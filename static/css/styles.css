@@ -589,6 +589,19 @@ i[data-lucide],
   height: 12px;
 }
 
+.topbar-assessment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.44rem;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.01);
+  color: #d8def2;
+  font-size: 0.74rem;
+  font-weight: 500;
+  padding: 0.34rem 0.72rem;
+}
+
 .workspace-header {
   display: flex;
   align-items: flex-start;
@@ -2107,7 +2120,7 @@ tbody tr:hover {
   }
 
   .sidebar-user {
-    display: none;
+    display: flex;
   }
 
   .workspace-topbar {

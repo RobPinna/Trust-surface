@@ -81,10 +81,6 @@
 
             <div class="sidebar-divider"></div>
             <nav class="sidebar-nav sidebar-nav-secondary text-sm">
-              <a class="nav-link secondary" href="/settings#support">
-                <i data-lucide="life-buoy" class="nav-icon"></i>
-                <span>Support</span>
-              </a>
               <a class="nav-link secondary {% if active == 'settings' %}active{% endif %}" href="/settings">
                 <i data-lucide="settings-2" class="nav-icon"></i>
                 <span>Settings</span>
@@ -112,16 +108,13 @@
             </div>
             <div class="workspace-topbar-actions">
               {% block topbar_right %}{% endblock %}
-              <div class="topbar-user-chip">
-                <div class="topbar-avatar">{{ (request.session.get('username') or 'U')[:1] | upper }}</div>
-                <div class="topbar-user-copy">
-                  <span class="topbar-user-name">{{ request.session.get('username') }}</span>
-                  <span class="topbar-user-mail">{{ request.session.get('username') }}@local</span>
-                </div>
-                <a class="topbar-icon-btn topbar-logout" href="/logout" aria-label="Logout">
-                  <i data-lucide="log-out"></i>
-                </a>
+              {% set _assessment_ts = (assessment.created_at if assessment and assessment.created_at else (assessment.updated_at if assessment else None)) %}
+              {% if _assessment_ts %}
+              <div class="topbar-assessment-chip" aria-label="Assessment time stamp">
+                <span class="topbar-pill-label">Assessment time stamp</span>
+                <span class="topbar-pill-value">{{ _assessment_ts.strftime('%Y-%m-%d %H:%M:%S') }} UTC</span>
               </div>
+              {% endif %}
             </div>
           </header>
           <div class="workspace-header">
