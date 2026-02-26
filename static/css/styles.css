@@ -1200,15 +1200,17 @@ i[data-lucide],
 
 .abuse-timeline {
   display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.72rem;
 }
 
 .abuse-step {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  column-gap: 0.78rem;
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 170px;
+  min-width: 160px;
+  max-width: 210px;
   opacity: 0;
   transform: translateY(8px);
   animation: abuse-step-reveal 420ms ease forwards;
@@ -1239,16 +1241,15 @@ i[data-lucide],
 }
 
 .abuse-step-rail {
-  position: relative;
-  min-height: 100%;
+  height: 12px;
   display: flex;
-  justify-content: center;
+  align-items: center;
+  margin: 0 0 0.42rem;
 }
 
 .abuse-step-dot {
   width: 8px;
   height: 8px;
-  margin-top: 0.44rem;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.6);
   background: rgba(241, 244, 255, 0.92);
@@ -1259,14 +1260,11 @@ i[data-lucide],
 }
 
 .abuse-step-line {
-  position: absolute;
-  top: 1.06rem;
-  bottom: -0.7rem;
-  left: 50%;
-  width: 1px;
-  transform: translateX(-50%);
+  flex: 1 1 auto;
+  height: 1px;
+  margin-left: 0.4rem;
   background: linear-gradient(
-    180deg,
+    90deg,
     rgba(223, 229, 255, 0.62),
     rgba(177, 190, 230, 0.34) 48%,
     rgba(128, 139, 173, 0.1)
@@ -1274,7 +1272,23 @@ i[data-lucide],
 }
 
 .abuse-step-body {
-  padding: 0.08rem 0 0.82rem;
+  padding: 0.66rem 0.68rem 0.72rem;
+  min-height: 144px;
+}
+
+.abuse-step-body .item-title {
+  font-size: 0.88rem;
+  line-height: 1.3;
+}
+
+.abuse-step-body .item-description {
+  font-size: 0.79rem;
+  line-height: 1.45;
+}
+
+.abuse-step-body .badge {
+  font-size: 0.66rem;
+  padding: 0.28rem 0.46rem;
 }
 
 .abuse-step:hover .abuse-step-dot {
@@ -1301,6 +1315,19 @@ i[data-lucide],
     opacity: 1;
     transform: none;
     animation: none;
+  }
+}
+
+@media (max-width: 1024px) {
+  .abuse-step {
+    flex-basis: calc(50% - 0.36rem);
+    max-width: none;
+  }
+}
+
+@media (max-width: 680px) {
+  .abuse-step {
+    flex-basis: 100%;
   }
 }
 

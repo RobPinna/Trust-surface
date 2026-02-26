@@ -4253,6 +4253,15 @@ def build_risk_detail_viewmodel(
             except Exception:
                 pass
     risk["reasoning"] = risk_reasoning
+    business_impact_text = str(row.impact_rationale or "").strip()
+    if not business_impact_text:
+        business_impact_text = str(risk_reasoning.get("why", "")).strip()
+    if not business_impact_text:
+        business_impact_text = str(row.description or "").strip()
+    business_impact_text = re.sub(r"^\s*context:\s*", "", business_impact_text, flags=re.IGNORECASE).strip()
+    business_impact_text = _first_sentence(business_impact_text, max_chars=420)
+    if not business_impact_text:
+        business_impact_text = "Potential trust, operational, and client confidence impact requires validation with additional evidence."
 
     # Lightweight CTI tags (heuristic, defensive-only): chips for stakeholders.
     campaign_chips, mitre_chips = _cti_chips_for_risk(
@@ -4275,6 +4284,7 @@ def build_risk_detail_viewmodel(
 
     details = {
         "exec_brief": exec_brief,
+        "business_impact": business_impact_text,
         "confirm_points": confirm_points,
         "deny_points": deny_points,
         "control_points": _control_points_from_actions(list(actions or [])),

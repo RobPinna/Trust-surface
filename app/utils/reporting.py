@@ -494,35 +494,24 @@ def render_risk_pdf(
         story.append(Paragraph("No recipe bundles available.", body_style))
     story.append(Spacer(1, 8))
 
-    story.append(Paragraph("Risk story map", h2_style))
-    story.append(Paragraph("Per-risk chain from signals to impact.", body_style))
-    sig_cards = list(story_map.get("signals") or [])
+    story.append(Paragraph("Abuse path", h2_style))
     abuse_cards = list(story_map.get("abuse_path") or [])
-    impact_cards = list(story_map.get("impacts") or [])
     _append_story_map_column(
         story,
-        heading="Signals",
-        cards=sig_cards,
-        evidence_sets=evidence_sets,
-        h3_style=h3_style,
-        body_style=body_style,
-    )
-    _append_story_map_column(
-        story,
-        heading="Abuse path",
+        heading="Timeline",
         cards=abuse_cards,
         evidence_sets=evidence_sets,
         h3_style=h3_style,
         body_style=body_style,
     )
-    _append_story_map_column(
-        story,
-        heading="Impact",
-        cards=impact_cards,
-        evidence_sets=evidence_sets,
-        h3_style=h3_style,
-        body_style=body_style,
-    )
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph("Business impact", h2_style))
+    business_impact = _pdf_text(details.get("business_impact", ""))
+    if business_impact:
+        story.append(Paragraph(business_impact, body_style))
+    else:
+        story.append(Paragraph("Business impact narrative not available.", body_style))
     story.append(Spacer(1, 8))
 
     story.append(Paragraph("What would confirm", h2_style))

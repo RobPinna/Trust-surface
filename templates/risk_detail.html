@@ -113,98 +113,50 @@
     <section class="panel p-6">
       <div class="section-header-row">
         <div>
-          <h3 class="section-title">Risk story map</h3>
-          <p class="section-subtitle">Per-risk chain from signals to impact.</p>
+          <h3 class="section-title">Abuse path</h3>
         </div>
       </div>
       <div class="divider"></div>
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div>
-          <p class="story-col-title">Signals</p>
-          <div class="space-y-3">
-            {% for c in vm.story_map.signals %}
-            {% set __sig_set = vm.evidenceSets.get(c.evidence_set_id, []) if vm.evidenceSets else [] %}
-            {% set __sig_ev = __sig_set[0] if __sig_set and (__sig_set | length) > 0 else None %}
-            {% set __sig_url = __sig_ev.url if __sig_ev else '' %}
-            {% set __sig_doc_id = __sig_ev.doc_id if __sig_ev else None %}
-            <article class="info-card compact">
-              <p class="item-title flex items-center gap-2">
-                <i data-lucide="{{ c.icon }}" class="inline-icon"></i>
-                {{ c.title }}
-              </p>
-              <p class="item-description clamp-2 mt-1">{{ c.detail }}</p>
-              {% if __sig_set and (__sig_set | length) > 0 %}
-              <div class="mt-3 flex gap-2 flex-wrap">
-                {% if __sig_url and (__sig_url.startswith('http://') or __sig_url.startswith('https://')) %}
-                <a class="badge" href="{{ __sig_url }}" target="_blank" rel="noreferrer">Evidence</a>
-                {% elif __sig_doc_id %}
-                <a class="badge" href="/documents/{{ __sig_doc_id }}">Evidence</a>
-                {% else %}
-                <a class="badge" href="/assessments/{{ assessment.id }}/evidence">Evidence</a>
-                {% endif %}
-              </div>
-              {% endif %}
-            </article>
-            {% else %}
-            <div class="empty-state">No signal bundles available.</div>
-            {% endfor %}
+      <div class="abuse-timeline">
+        {% for c in vm.story_map.abuse_path %}
+        {% set __step_set = vm.evidenceSets.get(c.evidence_set_id, []) if vm.evidenceSets else [] %}
+        {% set __step_ev = __step_set[0] if __step_set and (__step_set | length) > 0 else None %}
+        {% set __step_url = __step_ev.url if __step_ev else '' %}
+        {% set __step_doc_id = __step_ev.doc_id if __step_ev else None %}
+        <article class="abuse-step">
+          <div class="abuse-step-rail" aria-hidden="true">
+            <span class="abuse-step-dot"></span>
+            {% if not loop.last %}
+            <span class="abuse-step-line"></span>
+            {% endif %}
           </div>
-        </div>
-
-        <div>
-          <p class="story-col-title">Abuse path</p>
-          <div class="abuse-timeline">
-            {% for c in vm.story_map.abuse_path %}
-            {% set __step_set = vm.evidenceSets.get(c.evidence_set_id, []) if vm.evidenceSets else [] %}
-            {% set __step_ev = __step_set[0] if __step_set and (__step_set | length) > 0 else None %}
-            {% set __step_url = __step_ev.url if __step_ev else '' %}
-            {% set __step_doc_id = __step_ev.doc_id if __step_ev else None %}
-            <article class="abuse-step">
-              <div class="abuse-step-rail" aria-hidden="true">
-                <span class="abuse-step-dot"></span>
-                {% if not loop.last %}
-                <span class="abuse-step-line"></span>
-                {% endif %}
-              </div>
-              <div class="abuse-step-body">
-                <p class="item-title">{{ c.title }}</p>
-                <p class="item-description mt-1">{{ c.detail }}</p>
-                {% if __step_set and (__step_set | length) > 0 %}
-                <div class="mt-2 flex gap-2 flex-wrap">
-                {% if __step_url and (__step_url.startswith('http://') or __step_url.startswith('https://')) %}
-                <a class="badge" href="{{ __step_url }}" target="_blank" rel="noreferrer">Evidence</a>
-                {% elif __step_doc_id %}
-                <a class="badge" href="/documents/{{ __step_doc_id }}">Evidence</a>
-                {% else %}
-                <a class="badge" href="/assessments/{{ assessment.id }}/evidence">Evidence</a>
-                {% endif %}
-                </div>
-                {% endif %}
-              </div>
-            </article>
+          <div class="abuse-step-body info-card compact">
+            <p class="item-title">{{ c.title }}</p>
+            <p class="item-description mt-1">{{ c.detail }}</p>
+            {% if __step_set and (__step_set | length) > 0 %}
+            <div class="mt-2 flex gap-2 flex-wrap">
+            {% if __step_url and (__step_url.startswith('http://') or __step_url.startswith('https://')) %}
+            <a class="badge" href="{{ __step_url }}" target="_blank" rel="noreferrer">Evidence</a>
+            {% elif __step_doc_id %}
+            <a class="badge" href="/documents/{{ __step_doc_id }}">Evidence</a>
             {% else %}
-            <div class="empty-state">No timeline steps available.</div>
-            {% endfor %}
+            <a class="badge" href="/assessments/{{ assessment.id }}/evidence">Evidence</a>
+            {% endif %}
+            </div>
+            {% endif %}
           </div>
-        </div>
-
-        <div>
-          <p class="story-col-title">Impact</p>
-          <div class="space-y-3">
-            {% for c in vm.story_map.impacts %}
-            <article class="info-card compact">
-              <p class="item-title flex items-center gap-2">
-                <i data-lucide="{{ c.icon }}" class="inline-icon"></i>
-                {{ c.title }}
-              </p>
-              <p class="item-description mt-1">{{ c.detail }}</p>
-            </article>
-            {% else %}
-            <div class="empty-state">No impact notes.</div>
-            {% endfor %}
-          </div>
-        </div>
+        </article>
+        {% else %}
+        <div class="empty-state">No abuse path steps available.</div>
+        {% endfor %}
       </div>
+    </section>
+
+    <section class="panel p-6">
+      <h3 class="section-title">Business impact</h3>
+      <article class="info-card compact mt-4">
+        <p class="item-description">{{ vm.details.business_impact }}</p>
+      </article>
     </section>
 
     <section class="panel p-6">
@@ -254,41 +206,6 @@
             {% endfor %}
           </div>
         </article>
-      </div>
-    </section>
-
-    <section class="panel p-6" id="evidence">
-      <div class="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h3 class="section-title">Top evidence</h3>
-          <p class="section-subtitle">Evidence shown here passed relevance validation for this risk type.</p>
-        </div>
-        <a class="btn-ghost text-xs" href="/assessments/{{ assessment.id }}/evidence">Evidence log</a>
-      </div>
-      <div class="mt-4 space-y-3">
-        {% for ev in vm.details.evidence %}
-        <article class="info-card compact">
-          <div class="flex items-start justify-between gap-3 flex-wrap">
-            <div class="min-w-0">
-              <p class="item-description clamp-2">{{ ev.snippet }}</p>
-              <p class="item-meta mt-2">
-                <span class="badge">{{ ev.signal_type }}</span>
-                <span class="ml-2">Confidence: {{ ev.confidence }}%</span>
-              </p>
-            </div>
-            <div class="flex items-center gap-2 flex-wrap">
-              {% if ev.doc_id %}
-              <a class="btn-ghost text-xs" href="/documents/{{ ev.doc_id }}">Document</a>
-              {% endif %}
-              {% if ev.url %}
-              <a class="btn-ghost text-xs" href="{{ ev.url }}" target="_blank" rel="noreferrer">Source</a>
-              {% endif %}
-            </div>
-          </div>
-        </article>
-        {% else %}
-        <div class="empty-state">Insufficient evidence.</div>
-        {% endfor %}
       </div>
     </section>
 
