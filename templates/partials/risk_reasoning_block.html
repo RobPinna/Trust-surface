@@ -39,6 +39,7 @@
   {% endif %}
 {% endfor %}
 {% set _how_text = (reasoning.how or '') | trim %}
+{% set _how_struct = reasoning.how_struct if reasoning.how_struct is defined and reasoning.how_struct else {} %}
 {% set _signal_links = reasoning.signal_links if reasoning.signal_links is defined and reasoning.signal_links else [] %}
 {% set _full_text = reasoning_full_text if reasoning_full_text is defined else false %}
 <div class="mt-3 grid grid-cols-1 {% if not _compact %}sm:grid-cols-2{% endif %} gap-2">
@@ -97,7 +98,25 @@
   <article class="info-card compact">
     <p class="kpi-label">Why it matters</p>
     <p class="item-description mt-1 {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300 whitespace-normal break-words {% if _full_text %}line-clamp-none max-h-none overflow-visible{% endif %}">{{ _why_ns.text }}</p>
-    {% if _how_text %}
+    {% if _how_struct and _how_struct.get('items') %}
+    <div class="mt-3">
+      <p class="kpi-label">How</p>
+      <ol class="mt-2 space-y-2">
+        {% for _h in _how_struct.get('items', []) %}
+        <li class="flex gap-2 item-description {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300">
+          <span class="text-amber-300">{{ loop.index }}.</span>
+          <span data-how-code-highlight="1">{{ _h }}</span>
+        </li>
+        {% endfor %}
+      </ol>
+      {% if _how_struct.get('rationale') %}
+      <p class="item-meta mt-5"><span class="text-slate-300">Rationale:</span> {{ _how_struct.get('rationale') }}</p>
+      {% endif %}
+      {% if _how_struct.get('uncertainty') %}
+      <p class="item-meta mt-4"><span class="text-slate-300">Uncertainty:</span> {{ _how_struct.get('uncertainty') }}</p>
+      {% endif %}
+    </div>
+    {% elif _how_text %}
     <div class="mt-3">
       <p class="kpi-label">How</p>
       <p class="item-description mt-1 {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300 whitespace-normal break-words {% if _full_text %}line-clamp-none max-h-none overflow-visible{% endif %}" data-how-code-highlight="1">{{ _how_text }}</p>

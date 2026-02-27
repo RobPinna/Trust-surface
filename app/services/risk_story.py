@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import Assessment, Document, Evidence, Hypothesis, WorkflowNode
-from app.services.risk_brief_service import BriefInput, get_or_generate_brief, get_or_generate_how_text
+from app.services.risk_brief_service import (
+    BriefInput,
+    get_or_generate_brief,
+    get_or_generate_llm_hypothesis,
+    get_or_generate_llm_risk_sections,
+)
 from app.services.evidence_quality_classifier import classify_evidence
 from app.services.signal_model import (
     SIGNAL_ICONS,
@@ -52,6 +57,9 @@ CONNECTOR_HUMAN_LABELS = {
     "vendor_js_detection": "Third-party vendor technologies on web pages",
     "procurement_documents": "Public procurement/workflow documents",
     "public_docs_pdf": "Public PDF documents",
+    "brand_impersonation_monitor": "Brand impersonation and typosquat monitoring",
+    "hibp_breach_domain": "Domain breach exposure",
+    "shodan": "External attack-surface telemetry",
 }
 CONNECTOR_PRIORITY = {
     "website_analyzer": 0,
@@ -66,6 +74,9 @@ CONNECTOR_PRIORITY = {
     "social_mock": 9,
     "gdelt_news": 10,
     "media_trend": 11,
+    "brand_impersonation_monitor": 12,
+    "hibp_breach_domain": 13,
+    "shodan": 14,
 }
 EMAIL_PATTERN = re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b")
 PHONE_PATTERN = re.compile(r"\+?\d[\d\s().\-]{7,}\d")
@@ -84,6 +95,15 @@ ROLE_HINTS = (
     "executive",
     "director",
     "manager",
+)
+ROLE_CANONICAL_LABELS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("finance", "billing", "accounts payable", "treasury", "invoice"), "Finance / Billing"),
+    (("procurement", "supplier", "vendor"), "Procurement / Vendor Management"),
+    (("support", "helpdesk", "customer care", "contact center"), "Support / Customer Care"),
+    (("privacy", "dpo", "legal", "gdpr", "compliance"), "Privacy / Legal"),
+    (("security", "it", "identity", "infrastructure", "admin"), "IT / Security Operations"),
+    (("hr", "people"), "HR / People Operations"),
+    (("executive", "director", "manager", "ceo"), "Executive Leadership"),
 )
 
 
@@ -249,6 +269,102 @@ def _single_risk_headline(
         if vector:
             return _sentence_case(vector.strip(" .,:;-"))
     return "Risk"
+
+
+def _contextual_risk_headline(
+    *,
+    primary_risk_type: str,
+    fallback_outcome: str,
+    risk_vector_summary: str,
+    why_it_matters: str,
+    how_text: str,
+    business_impact: str,
+    max_chars: int = 96,
+) -> str:
+    base = _single_risk_headline(
+        primary_risk_type=primary_risk_type,
+        title="",
+        risk_vector_summary=risk_vector_summary,
+    )
+    if not base or base.lower() == "risk":
+        base = _risk_display_name(primary_risk_type=primary_risk_type, fallback_outcome=fallback_outcome)
+    base = " ".join(str(base or "").split()).strip(" .,:;-")
+    if not base:
+        base = "Risk"
+
+    corpus = " ".join(
+        str(x or "")
+        for x in (
+            risk_vector_summary,
+            why_it_matters,
+            how_text,
+            business_impact,
+        )
+    ).lower()
+
+    workflow = ""
+    workflow_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("payment workflow", ("invoice", "payment", "iban", "wire", "bank", "refund", "billing", "chargeback")),
+        ("account recovery workflow", ("password reset", "account recovery", "login", "credential", "mfa", "vpn")),
+        ("vendor/procurement workflow", ("vendor", "supplier", "procurement", "purchase order", "po approval")),
+        ("support/helpdesk workflow", ("helpdesk", "support", "ticket", "customer care", "service desk")),
+        ("booking workflow", ("booking", "reservation", "guest", "stay", "check-in", "check out")),
+        ("donation workflow", ("donation", "fundraising", "donor", "charity")),
+        ("privacy/legal workflow", ("privacy", "legal", "gdpr", "dpo", "data request")),
+        ("public contact workflow", ("public email", "contact channel", "entrypoint", "official channel", "dm")),
+    )
+    for label, keys in workflow_rules:
+        if any(k in corpus for k in keys):
+            workflow = label
+            break
+
+    impact = ""
+    impact_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("financial loss", ("financial", "fraud", "payment", "invoice", "fund transfer", "loss")),
+        ("trust damage", ("trust erosion", "reputation", "brand", "confidence")),
+        ("data exposure", ("privacy", "pii", "data leak", "sensitive data", "disclosure")),
+        ("operational disruption", ("disruption", "downtime", "service impact", "workflow delay", "interruption")),
+    )
+    for label, keys in impact_rules:
+        if any(k in corpus for k in keys):
+            impact = label
+            break
+
+    candidates: list[str] = []
+    if workflow and impact:
+        candidates.extend(
+            [
+                f"{base}: {workflow} may enable {impact}",
+                f"{base}: {workflow} risk with {impact}",
+                f"{base}: {workflow} risk",
+            ]
+        )
+    elif workflow:
+        candidates.extend([f"{base}: {workflow} risk", f"{base}: {workflow}"])
+    elif impact:
+        candidates.extend([f"{base}: potential {impact}", base])
+    else:
+        candidates.append(base)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for row in candidates:
+        line = " ".join(str(row or "").split()).strip(" .,:;-")
+        if not line:
+            continue
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(line)
+    if not deduped:
+        deduped = [base]
+
+    for line in deduped:
+        if len(line) <= max_chars:
+            return line
+    shortest = min(deduped, key=len)
+    return shortest if shortest else base
 
 
 def _first_sentence(value: str, max_chars: int = 180) -> str:
@@ -1363,6 +1479,48 @@ def _inject_evidence_codes_in_how(text: str, refs: list[dict[str, Any]]) -> str:
     return " ".join(out).strip()
 
 
+def _how_hypotheses_with_codes(items: list[str], refs: list[dict[str, Any]]) -> list[str]:
+    lines = [" ".join(str(x).split()).strip() for x in (items or []) if " ".join(str(x).split()).strip()]
+    if not lines:
+        return []
+    meta = [(str(r.get("code", "")).strip(), _ref_keywords(r)) for r in refs if str(r.get("code", "")).strip()]
+    fallback_codes = [m[0] for m in meta if m and m[0]]
+    out: list[str] = []
+    used_codes: set[str] = set()
+    for idx, line in enumerate(lines):
+        existing = re.findall(r"E-\d{2,3}", line, flags=re.IGNORECASE)
+        if existing:
+            code = str(existing[0]).upper()
+            text = re.sub(r"\s*\[(?:E|e)-\d{2,3}\]\s*", " ", line).strip()
+            out.append(f"{text} [{code}]")
+            used_codes.add(code)
+            continue
+
+        low = line.lower()
+        best_code = ""
+        best_score = 0
+        for code, kws in meta:
+            if not kws:
+                continue
+            score = sum(1 for k in kws if k and k in low)
+            if score > best_score:
+                best_score = score
+                best_code = code
+        if not best_code and fallback_codes:
+            for c in fallback_codes:
+                if c not in used_codes:
+                    best_code = c
+                    break
+            if not best_code:
+                best_code = fallback_codes[min(idx, len(fallback_codes) - 1)]
+        if best_code:
+            used_codes.add(best_code)
+            out.append(f"{line} [{best_code}]")
+        else:
+            out.append(line)
+    return out[:6]
+
+
 def _signal_type_from_evidence_row(*, url: str, title: str, snippet: str, evidence_kind: str, category: str) -> str:
     kind = str(evidence_kind or "").strip().upper()
     cat = str(category or "").strip().lower()
@@ -2450,12 +2608,222 @@ def _confirm_deny_points(*, meta: dict, process_flags: dict | None) -> tuple[lis
     return [x for x in confirm if x][:4], [x for x in deny if x][:4]
 
 
-def _control_points_from_actions(actions: list[str]) -> list[dict[str, Any]]:
+def _impacted_roles_for_risk(
+    *,
+    evidence_valid: list[dict[str, Any]],
+    process_flags: dict | None,
+    risk_type: str,
+    primary_risk_type: str,
+) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _push(label: str) -> None:
+        clean = " ".join(str(label or "").split()).strip()
+        if not clean:
+            return
+        key = clean.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        found.append(clean)
+
+    for ev in evidence_valid or []:
+        parts = [
+            str(ev.get("title", "") or ""),
+            str(ev.get("snippet", "") or ""),
+            str(ev.get("doc_title", "") or ""),
+            str(ev.get("url", "") or ""),
+        ]
+        raw = ev.get("raw_json")
+        if isinstance(raw, dict):
+            parts.extend(
+                [
+                    str(raw.get("role_category", "") or ""),
+                    str(raw.get("keyword", "") or ""),
+                    str(raw.get("channel_policy", "") or ""),
+                    str(raw.get("policy_type", "") or ""),
+                    str(raw.get("service_tags", "") or ""),
+                ]
+            )
+        blob = " ".join(parts).lower()
+        for hints, label in ROLE_CANONICAL_LABELS:
+            if any(h in blob for h in hints):
+                _push(label)
+
+    sens = set()
+    if isinstance(process_flags, dict):
+        sens = {str(x).upper() for x in (process_flags.get("data_sens_kinds") or []) if str(x).strip()}
+    if "BOOKING_PAYMENT" in sens:
+        _push("Finance / Billing")
+        _push("Support / Customer Care")
+    if "CREDENTIALS" in sens:
+        _push("IT / Security Operations")
+        _push("Support / Customer Care")
+    if bool((process_flags or {}).get("social_dm_workflow", False)):
+        _push("Support / Customer Care")
+    if bool((process_flags or {}).get("social_to_booking", False)):
+        _push("Finance / Billing")
+
+    low_risk = f"{str(primary_risk_type or '')} {str(risk_type or '')}".lower()
+    if any(k in low_risk for k in ("procurement", "vendor", "supplier")):
+        _push("Procurement / Vendor Management")
+    if any(k in low_risk for k in ("privacy", "dpo", "data")):
+        _push("Privacy / Legal")
+    if any(k in low_risk for k in ("credential", "account", "login")):
+        _push("IT / Security Operations")
+
+    if not found:
+        _push("Support / Customer Care")
+        _push("Finance / Billing")
+        _push("IT / Security Operations")
+    return found[:5]
+
+
+def _contradictions_to_mitigate(
+    *,
+    evidence_valid: list[dict[str, Any]],
+    process_flags: dict | None,
+    signal_counts: dict[str, int] | None = None,
+) -> list[str]:
+    lines: list[str] = []
+    for ev in evidence_valid or []:
+        raw = ev.get("raw_json")
+        raw_txt = ""
+        if isinstance(raw, dict):
+            try:
+                raw_txt = " ".join(str(v) for v in raw.values())
+            except Exception:
+                raw_txt = ""
+        line = " ".join(
+            [
+                str(ev.get("title", "") or ""),
+                str(ev.get("snippet", "") or ""),
+                str(ev.get("url", "") or ""),
+                raw_txt,
+            ]
+        ).strip()
+        if line:
+            lines.append(line.lower())
+    blob = " || ".join(lines)
+
+    def _has_any(*needles: str) -> bool:
+        return any(str(n).lower() in blob for n in needles if str(n).strip())
+
+    has_portal_only_policy = _has_any(
+        "only via portal",
+        "only through portal",
+        "secure portal only",
+        "portal only",
+        "never via email",
+        "not via email",
+        "never via dm",
+        "do not use dm",
+    )
+    has_email_dm_channels = _has_any(
+        "found public email",
+        "contact_email",
+        "contact channel",
+        "direct message",
+        "dm-based contact",
+        "whatsapp",
+        "telegram",
+        "mailto:",
+        "support@",
+    )
+    has_approval_policy = _has_any(
+        "approval required",
+        "approved by",
+        "manager approval",
+        "dual approval",
+        "two-person",
+        "four-eyes",
+        "sign-off",
+    )
+    has_urgency_exception = _has_any(
+        "urgent exception",
+        "emergency exception",
+        "urgent request",
+        "expedite",
+        "override",
+    )
+    has_registry_claim = _has_any(
+        "official channel registry",
+        "authorized channels",
+        "official channels only",
+    )
+    has_multi_entry = _has_any(
+        "multiple official entrypoints",
+        "channel ambiguity",
+        "multiple contact channels",
+        "dm-based contact handling",
+    )
+
+    out: list[str] = []
+    if has_portal_only_policy and has_email_dm_channels:
+        out.append(
+            "Policy says 'only portal', but evidence shows email/DM used for the same workflow."
+        )
+    if has_approval_policy and has_urgency_exception:
+        out.append(
+            "Policy requires approval controls, but urgency/exception language may bypass them in practice."
+        )
+    if has_registry_claim and has_multi_entry:
+        out.append(
+            "Policy states official channels are defined, but evidence indicates multi-entrypoint ambiguity."
+        )
+    if bool((process_flags or {}).get("trust_friction", False)) and has_email_dm_channels:
+        out.append(
+            "Sensitive requests can start on external channels while clear verification guidance is missing."
+        )
+
+    try:
+        contact_count = int((signal_counts or {}).get("CONTACT_CHANNEL", 0) or 0)
+    except Exception:
+        contact_count = 0
+    if contact_count >= 2 and bool((process_flags or {}).get("social_dm_workflow", False)):
+        out.append(
+            "Multiple contact channels plus DM workflows increase ambiguity on where sensitive requests are legitimate."
+        )
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for line in out:
+        key = " ".join(str(line).split()).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(" ".join(str(line).split()).strip())
+    return deduped[:4]
+
+
+def _control_points_from_actions(
+    actions: list[str],
+    *,
+    contradictions: list[str] | None = None,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for idx, action in enumerate([a for a in (actions or []) if str(a or "").strip()][:8]):
+    row_idx = 0
+
+    for contradiction in [c for c in (contradictions or []) if str(c or "").strip()][:3]:
+        row_idx += 1
+        text = " ".join(str(contradiction).split()).strip()
+        out.append(
+            {
+                "id": f"cp-{row_idx}",
+                "title": f"Mitigate contradiction: {text[:220]}",
+                "effort": "MED",
+                "expected_reduction": "HIGH",
+                "tooltip_reason": "Resolve policy-vs-practice gaps to reduce trust-channel abuse opportunities.",
+                "is_contradiction": True,
+            }
+        )
+
+    for action in [a for a in (actions or []) if str(a or "").strip()][:8]:
         text = " ".join(str(action).split()).strip()
         if not text:
             continue
+        row_idx += 1
 
         lowered = text.lower()
         effort = "MED"
@@ -2481,14 +2849,15 @@ def _control_points_from_actions(actions: list[str]) -> list[dict[str, Any]]:
 
         out.append(
             {
-                "id": f"cp-{idx + 1}",
+                "id": f"cp-{row_idx}",
                 "title": text[:220],
                 "effort": effort,
                 "expected_reduction": reduction,
                 "tooltip_reason": reason,
+                "is_contradiction": False,
             }
         )
-        if len(out) >= 5:
+        if len(out) >= 7:
             break
     return out
 
@@ -2695,7 +3064,15 @@ def get_ranked_risks(
             sector=str(assessment.sector or ""),
             process_flags=parsed.process_flags,
         )
-        title = _risk_display_name(primary_risk_type=primary_risk_type, fallback_outcome=outcome)
+        risk_vector_summary = str(getattr(h, "risk_vector_summary", "") or "").strip()
+        title = _contextual_risk_headline(
+            primary_risk_type=primary_risk_type,
+            fallback_outcome=outcome,
+            risk_vector_summary=risk_vector_summary,
+            why_it_matters=str(getattr(h, "impact_rationale", "") or ""),
+            how_text=str(getattr(h, "description", "") or ""),
+            business_impact=str(getattr(h, "impact_rationale", "") or ""),
+        )
 
         timeline = from_json(h.timeline_json or "[]", [])
         if not isinstance(timeline, list) or not timeline:
@@ -2944,7 +3321,7 @@ def get_ranked_risks(
             "id": int(h.id),
             "risk_type": str(h.risk_type or "other"),
             "primary_risk_type": primary_risk_type,
-            "risk_vector_summary": str(getattr(h, "risk_vector_summary", "") or "").strip(),
+            "risk_vector_summary": risk_vector_summary,
             "baseline_tag": bool(getattr(h, "baseline_tag", False)),
             "status": status_value,
             "title": title,
@@ -3180,38 +3557,94 @@ def build_overview_viewmodel(
     top_candidate = elevated[0] if elevated else (risk_summaries[0] if risk_summaries else None)
     top_candidate_id = int(top_candidate.get("id", 0) or 0) if isinstance(top_candidate, dict) else 0
 
+    detail_viewmodels_by_id: dict[int, dict[str, Any]] = {}
+    for row in risk_summaries:
+        if not isinstance(row, dict):
+            continue
+        rid = int(row.get("id", 0) or 0)
+        if rid <= 0 or rid in detail_viewmodels_by_id:
+            continue
+        try:
+            dvm = build_risk_detail_viewmodel(
+                db,
+                assessment,
+                rid,
+                allow_generated_text=True,
+                ranked_snapshot=ranked,
+            )
+        except Exception:
+            logger.exception("Failed to sync overview row with risk detail for assessment %s risk %s", assessment_id, rid)
+            continue
+        if isinstance(dvm, dict) and isinstance(dvm.get("risk"), dict):
+            detail_viewmodels_by_id[rid] = dvm
+
     ordered_risks: list[dict[str, Any]] = []
     mitre_codes_set: set[str] = set()
     for idx, row in enumerate(risk_summaries, start=1):
         if not isinstance(row, dict):
             continue
-        counts = {}
-        try:
-            counts = dict((row.get("meta") or {}).get("signal_counts") or {})
-        except Exception:
+
+        rid = int(row.get("id", 0) or 0)
+        dvm = detail_viewmodels_by_id.get(rid, {})
+        drisk = dvm.get("risk") if isinstance(dvm, dict) else {}
+        dreason = drisk.get("reasoning") if isinstance(drisk, dict) and isinstance(drisk.get("reasoning"), dict) else {}
+
+        row_mitre = [
+            " ".join(str(x).split()).strip().upper()
+            for x in list(drisk.get("mitre_chips") or [])
+            if " ".join(str(x).split()).strip()
+        ] if isinstance(drisk, dict) else []
+        if not row_mitre:
             counts = {}
-        _, row_mitre = _cti_chips_for_risk(
-            risk_type=str(row.get("risk_type", "")),
-            signal_counts=counts,
-            signal_coverage=int(row.get("signal_coverage", 0) or 0),
-        )
+            try:
+                counts = dict((row.get("meta") or {}).get("signal_counts") or {})
+            except Exception:
+                counts = {}
+            _, row_mitre = _cti_chips_for_risk(
+                risk_type=str(row.get("risk_type", "")),
+                signal_counts=counts,
+                signal_coverage=int(row.get("signal_coverage", 0) or 0),
+            )
         for code in row_mitre:
             mitre_codes_set.add(str(code))
+
+        summary_raw = ""
+        if isinstance(dreason, dict):
+            summary_raw = " ".join(str(dreason.get("why_it_matters") or dreason.get("why") or "").split()).strip()
+        if not summary_raw:
+            summary_raw = " ".join(str(row.get("why_matters", "") or "").split()).strip()
+        summary_text = summary_raw if summary_raw else "Open for evidence and defensive controls."
+
+        title_text = (
+            str(drisk.get("headline", "")).strip()
+            if isinstance(drisk, dict)
+            else ""
+        )
+        if not title_text and isinstance(drisk, dict):
+            title_text = str(drisk.get("title", "")).strip()
+        if not title_text:
+            title_text = str(row.get("title", "") or "Risk")
+
         ordered_risks.append(
             {
                 "rank": int(idx),
-                "id": int(row.get("id", 0) or 0),
-                "is_top": bool(int(row.get("id", 0) or 0) == top_candidate_id and top_candidate_id > 0),
-                "title": str(row.get("title", "") or "Risk"),
-                "primary_risk_type": str(row.get("primary_risk_type", "") or "").strip(),
-                "status": str(row.get("status", "WATCHLIST")),
-                "likelihood": str(row.get("likelihood", "med")),
-                "impact_band": str(row.get("impact_band", "MED")),
-                "evidence_strength": str(row.get("evidence_strength", "WEAK")),
-                "confidence": int(row.get("confidence", 0) or 0),
-                "summary": str(row.get("why_matters", "") or "").strip(),
-                "scenario_url": str(row.get("scenario_url", "")),
+                "id": rid,
+                "is_top": bool(rid == top_candidate_id and top_candidate_id > 0),
+                "title": title_text,
+                "primary_risk_type": (
+                    str(drisk.get("primary_risk_type", "")).strip()
+                    if isinstance(drisk, dict)
+                    else str(row.get("primary_risk_type", "") or "").strip()
+                ),
+                "status": str(drisk.get("status", row.get("status", "WATCHLIST"))) if isinstance(drisk, dict) else str(row.get("status", "WATCHLIST")),
+                "likelihood": str(drisk.get("likelihood", row.get("likelihood", "med"))) if isinstance(drisk, dict) else str(row.get("likelihood", "med")),
+                "impact_band": str(drisk.get("impact_band", row.get("impact_band", "MED"))) if isinstance(drisk, dict) else str(row.get("impact_band", "MED")),
+                "evidence_strength": str(drisk.get("evidence_strength", row.get("evidence_strength", "WEAK"))) if isinstance(drisk, dict) else str(row.get("evidence_strength", "WEAK")),
+                "confidence": int(drisk.get("evidence_strength_score", row.get("confidence", 0)) or 0) if isinstance(drisk, dict) else int(row.get("confidence", 0) or 0),
+                "summary": summary_text,
+                "scenario_url": str(drisk.get("scenario_url", row.get("scenario_url", ""))) if isinstance(drisk, dict) else str(row.get("scenario_url", "")),
                 "posture_score": int(_risk_posture_score(row)),
+                "reasoning": dict(dreason) if isinstance(dreason, dict) else dict(row.get("reasoning") or {}),
             }
         )
 
@@ -3344,6 +3777,13 @@ def build_overview_viewmodel(
 
     top_id = int(top["id"])
     top_row = hypotheses_by_id.get(top_id) or next((h for h in hypotheses if int(h.id) == top_id), None)
+    top_dvm = detail_viewmodels_by_id.get(top_id, {})
+    top_drisk = top_dvm.get("risk") if isinstance(top_dvm, dict) and isinstance(top_dvm.get("risk"), dict) else {}
+    top_dreason = (
+        top_drisk.get("reasoning")
+        if isinstance(top_drisk, dict) and isinstance(top_drisk.get("reasoning"), dict)
+        else {}
+    )
 
     top_ev_valid = evidence_sets.get(f"risk:{top_id}", [])
     top_process_flags = top.get("process_flags") if isinstance(top.get("process_flags"), dict) else None
@@ -3402,15 +3842,21 @@ def build_overview_viewmodel(
     topRiskVerdict = {
         "top_risk_id": top_id,
         "verdict_line": verdict_line,
-        "primary_risk_type": primary_risk_type,
-        "risk_vector_summary": str(getattr(top_row, "risk_vector_summary", "") or "").strip() if top_row else "",
-        "scenario_url": str(top.get("scenario_url", "")),
-        "likelihood": str(top.get("likelihood", "med")),
-        "impact_band": str(top.get("impact_band", "MED")),
-        "evidence_strength": str(top.get("evidence_strength", "WEAK")),
-        "confidence": int(top.get("confidence", 0) or 0),
+        "primary_risk_type": str(top_drisk.get("primary_risk_type", primary_risk_type)) if isinstance(top_drisk, dict) else primary_risk_type,
+        "risk_vector_summary": (
+            str(top_drisk.get("risk_vector_summary", "")).strip()
+            if isinstance(top_drisk, dict) and str(top_drisk.get("risk_vector_summary", "")).strip()
+            else (str(getattr(top_row, "risk_vector_summary", "") or "").strip() if top_row else "")
+        ),
+        "scenario_url": str(top_drisk.get("scenario_url", top.get("scenario_url", ""))) if isinstance(top_drisk, dict) else str(top.get("scenario_url", "")),
+        "likelihood": str(top_drisk.get("likelihood", top.get("likelihood", "med"))) if isinstance(top_drisk, dict) else str(top.get("likelihood", "med")),
+        "impact_band": str(top_drisk.get("impact_band", top.get("impact_band", "MED"))) if isinstance(top_drisk, dict) else str(top.get("impact_band", "MED")),
+        "evidence_strength": str(top_drisk.get("evidence_strength", top.get("evidence_strength", "WEAK"))) if isinstance(top_drisk, dict) else str(top.get("evidence_strength", "WEAK")),
+        "confidence": int(top_drisk.get("evidence_strength_score", top.get("confidence", 0)) or 0) if isinstance(top_drisk, dict) else int(top.get("confidence", 0) or 0),
         "convergence_count": convergence_count,
-        "reasoning": (
+        "reasoning": dict(top_dreason)
+        if isinstance(top_dreason, dict) and top_dreason
+        else (
             dict(top.get("reasoning") or {})
             if isinstance(top.get("reasoning"), dict)
             else _reasoning_block_for_risk(
@@ -3432,7 +3878,12 @@ def build_overview_viewmodel(
         confirm_points, deny_points = [], []
 
     actions = top.get("defensive_actions") if isinstance(top.get("defensive_actions"), list) else []
-    control_points = _control_points_from_actions(list(actions or []))
+    contradictions = _contradictions_to_mitigate(
+        evidence_valid=list(top_ev_valid or []),
+        process_flags=top_process_flags,
+        signal_counts=dict(top_counts or {}),
+    )
+    control_points = _control_points_from_actions(list(actions or []), contradictions=contradictions)
 
     # Link workflows conservatively: explicit linkage first, otherwise evidence overlap.
     linked_workflows: list[WorkflowNode] = []
@@ -3868,6 +4319,7 @@ def build_risk_detail_viewmodel(
     risk_id: int,
     *,
     allow_generated_text: bool = True,
+    ranked_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build a risk-first detail view model for a single RiskObject (Hypothesis row).
@@ -3887,7 +4339,22 @@ def build_risk_detail_viewmodel(
             "details": {},
         }
 
-    ranked_snapshot = get_ranked_risks(db, assessment)
+    row_query_id = str(row.query_id or "")
+    row_risk_type = str(row.risk_type or "")
+    row_title = str(row.title or "")
+    row_description = str(row.description or "")
+    row_likelihood = str(row.likelihood or "med")
+    row_severity = int(row.severity or 3)
+    row_status = str(getattr(row, "status", "") or "WATCHLIST")
+    row_impact_rationale = str(row.impact_rationale or "")
+    row_evidence_refs_json = str(row.evidence_refs_json or "[]")
+    row_assumptions_json = str(row.assumptions_json or "[]")
+    row_gaps_to_verify_json = str(row.gaps_to_verify_json or "[]")
+    row_defensive_actions_json = str(row.defensive_actions_json or "[]")
+    row_signal_counts_json = str(row.signal_counts_json or "{}")
+    row_timeline_json = str(row.timeline_json or "[]")
+
+    ranked_snapshot = ranked_snapshot if isinstance(ranked_snapshot, dict) else get_ranked_risks(db, assessment)
     evidence_code_map = build_assessment_evidence_code_map(db, assessment, ranked_snapshot=ranked_snapshot)
     artifact_code_map = build_assessment_artifact_code_map(
         db,
@@ -3909,7 +4376,7 @@ def build_risk_detail_viewmodel(
     signal_connectors_by_type = dict(ranked_snapshot.get("signal_connectors_by_type") or {})
 
     # Prefetch documents referenced by this risk and by workflow nodes.
-    refs = from_json(row.evidence_refs_json or "[]", [])
+    refs = from_json(row_evidence_refs_json, [])
     if not isinstance(refs, list):
         refs = []
     doc_ids: set[int] = set()
@@ -3940,12 +4407,12 @@ def build_risk_detail_viewmodel(
             docs_by_url[str(d.url)] = d
 
     evidence_sets: dict[str, list[dict[str, Any]]] = {}
-    parsed = _parse_signal_counts_blob(row.signal_counts_json or "{}")
+    parsed = _parse_signal_counts_blob(row_signal_counts_json)
     evidence_all = _normalize_evidence_refs(
         refs,
         docs_by_id=docs_by_id,
         docs_by_url=docs_by_url,
-        query_id=str(row.query_id or "")[:16],
+        query_id=row_query_id[:16],
         connectors_by_url=connectors_by_url,
         indicator_hints_by_url=indicator_hints_by_url,
     )
@@ -3967,7 +4434,7 @@ def build_risk_detail_viewmodel(
             "snippet": str(x.get("snippet", "")),
             "confidence": int(x.get("confidence", 50) or 50),
             "signal_type": str(x.get("signal_type", "")),
-            "query_id": str(row.query_id or ""),
+            "query_id": row_query_id,
             "is_boilerplate": bool(x.get("is_boilerplate", False)),
             "weight": float(x.get("weight", 1.0) or 1.0),
             "quality_tier": str(x.get("quality_tier", "LOW")),
@@ -3977,7 +4444,7 @@ def build_risk_detail_viewmodel(
         if isinstance(x, dict)
     ]
     calc_conf, meta = compute_hypothesis_confidence(
-        ev_items, base_avg=base_avg, sector=str(assessment.sector or ""), risk_type=str(row.risk_type or "")
+        ev_items, base_avg=base_avg, sector=str(assessment.sector or ""), risk_type=row_risk_type
     )
     conf = max(1, min(100, int(calc_conf)))
     counts = meta.get("signal_counts") if isinstance(meta.get("signal_counts"), dict) else {}
@@ -3994,9 +4461,9 @@ def build_risk_detail_viewmodel(
     evidence_strength = _evidence_strength_label(coverage)
     evidence_quality = _evidence_quality_label(meta)
 
-    impact_band = _impact_band_from_severity(int(row.severity or 3))
-    likelihood = (str(row.likelihood or "med").strip().lower() or "med")[:8]
-    current_status = str(getattr(row, "status", "") or "WATCHLIST").upper()
+    impact_band = _impact_band_from_severity(int(row_severity))
+    likelihood = (str(row_likelihood).strip().lower() or "med")[:8]
+    current_status = row_status.upper()
     if isinstance(ranked_row, dict):
         conf = max(1, min(100, int(ranked_row.get("confidence", conf) or conf)))
         impact_band = str(ranked_row.get("impact_band", impact_band) or impact_band).upper()
@@ -4004,17 +4471,24 @@ def build_risk_detail_viewmodel(
         current_status = str(ranked_row.get("status", current_status) or current_status).upper()
     primary_risk_type = str(getattr(row, "primary_risk_type", "") or "").strip()
     outcome = _risk_outcome_label(
-        str(row.risk_type or ""), sector=str(assessment.sector or ""), process_flags=parsed.process_flags
+        row_risk_type, sector=str(assessment.sector or ""), process_flags=parsed.process_flags
     )
-    title = _risk_display_name(primary_risk_type=primary_risk_type, fallback_outcome=outcome)
-    if not primary_risk_type:
-        primary_risk_type = title
     risk_vector_summary = str(getattr(row, "risk_vector_summary", "") or "").strip()
+    title = _contextual_risk_headline(
+        primary_risk_type=primary_risk_type,
+        fallback_outcome=outcome,
+        risk_vector_summary=risk_vector_summary,
+        why_it_matters=str(getattr(row, "impact_rationale", "") or ""),
+        how_text=str(getattr(row, "description", "") or ""),
+        business_impact=str(getattr(row, "impact_rationale", "") or ""),
+    )
+    if not primary_risk_type:
+        primary_risk_type = _risk_display_name(primary_risk_type="", fallback_outcome=outcome)
 
-    timeline = from_json(row.timeline_json or "[]", [])
+    timeline = from_json(row_timeline_json, [])
     if not isinstance(timeline, list) or not timeline:
-        meta["risk_hint"] = str(row.title or "")
-        timeline = timeline_for_risk(str(row.risk_type or ""), meta)
+        meta["risk_hint"] = row_title
+        timeline = timeline_for_risk(row_risk_type, meta)
     abuse_path_steps_for_how: list[dict[str, str]] = []
     for idx, step in enumerate((timeline or [])[:6], start=1):
         if not isinstance(step, dict):
@@ -4042,15 +4516,11 @@ def build_risk_detail_viewmodel(
     ):
         risk_vector_summary = _verdict_line(
             primary_risk_type=primary_risk_type,
-            risk_type=str(row.risk_type or ""),
+            risk_type=row_risk_type,
             conditions=ingredient_phrases[:3],
             process_flags=parsed.process_flags,
         )
-    risk_headline = _single_risk_headline(
-        primary_risk_type=primary_risk_type,
-        title=title,
-        risk_vector_summary=risk_vector_summary,
-    )
+    risk_headline = title
     for b in bundles:
         evidence_sets[f"bundle:{b.get('id')}"] = list(b.get("evidence") or [])
     risk_evidence_pool = list(evidence_sets.get(f"risk:{rid}", []) or [])
@@ -4148,9 +4618,9 @@ def build_risk_detail_viewmodel(
             brief_inp = BriefInput(
                 assessment_id=assessment_id,
                 risk_kind="scenario",
-                risk_id=int(row.id),
-                title=str(row.title or title),
-                risk_type=str(row.risk_type or ""),
+                risk_id=int(rid),
+                title=str(row_title or title),
+                risk_type=row_risk_type,
                 primary_risk_type=primary_risk_type,
                 risk_vector_summary=risk_vector_summary,
                 conditions=conditions,
@@ -4169,8 +4639,8 @@ def build_risk_detail_viewmodel(
                 ],
                 vendor_cues=_vendor_cues_from_evidence(list(evidence_sets.get(f"risk:{rid}", []))),
                 channel_cues=_channel_cues_from_evidence(list(evidence_sets.get(f"risk:{rid}", []))),
-                impact_targets=_impact_targets_from_band(str(impact_band), str(row.risk_type or "")),
-                severity=int(row.severity or 3),
+                impact_targets=_impact_targets_from_band(str(impact_band), row_risk_type),
+                severity=int(row_severity or 3),
                 likelihood_badge=str(likelihood).upper(),
                 confidence=int(conf),
                 evidence=list(evidence_sets.get(f"risk:{rid}", [])),
@@ -4187,14 +4657,14 @@ def build_risk_detail_viewmodel(
 
     risk = {
         "id": rid,
-        "risk_type": str(row.risk_type or "other"),
+        "risk_type": row_risk_type or "other",
         "status": current_status,
         "primary_risk_type": primary_risk_type,
         "headline": risk_headline,
         "risk_vector_summary": risk_vector_summary,
         "baseline_tag": bool(getattr(row, "baseline_tag", False)),
         "title": title,
-        "description": str(row.description or "").strip(),
+        "description": row_description.strip(),
         "scenario_url": f"/assessments/{assessment_id}/risks/{rid}",
         "likelihood": likelihood,
         "impact_band": impact_band,
@@ -4230,64 +4700,231 @@ def build_risk_detail_viewmodel(
         )
     if signal_links:
         risk_reasoning["signal_links"] = signal_links
-    if allow_generated_text:
-        try:
-            how_text = get_or_generate_how_text(
-                db,
-                assessment_id=assessment_id,
-                risk_id=rid,
-                primary_risk_type=primary_risk_type,
-                risk_type=str(row.risk_type or ""),
-                abuse_path=abuse_path_steps_for_how,
-                likelihood=str(likelihood).upper(),
-                impact_band=str(impact_band).upper(),
-                evidence_strength=str(evidence_strength).upper(),
-                confidence=int(conf),
-            )
-            if str(how_text or "").strip():
-                risk_reasoning["how"] = _inject_evidence_codes_in_how(str(how_text).strip(), coded_signal_refs)
-        except Exception:
-            logger.exception("Failed to build risk HOW narrative for assessment %s risk %s", assessment_id, rid)
-            try:
-                db.rollback()
-            except Exception:
-                pass
     risk["reasoning"] = risk_reasoning
-    business_impact_text = str(row.impact_rationale or "").strip()
+    business_impact_text = row_impact_rationale.strip()
     if not business_impact_text:
         business_impact_text = str(risk_reasoning.get("why", "")).strip()
     if not business_impact_text:
-        business_impact_text = str(row.description or "").strip()
+        business_impact_text = row_description.strip()
     business_impact_text = re.sub(r"^\s*context:\s*", "", business_impact_text, flags=re.IGNORECASE).strip()
     business_impact_text = _first_sentence(business_impact_text, max_chars=420)
     if not business_impact_text:
         business_impact_text = "Potential trust, operational, and client confidence impact requires validation with additional evidence."
+    impacted_roles = _impacted_roles_for_risk(
+        evidence_valid=list(risk_evidence_pool or []),
+        process_flags=parsed.process_flags,
+        risk_type=row_risk_type,
+        primary_risk_type=str(primary_risk_type or ""),
+    )
+    contradictions = _contradictions_to_mitigate(
+        evidence_valid=list(risk_evidence_pool or []),
+        process_flags=parsed.process_flags,
+        signal_counts=dict(counts or {}),
+    )
+    llm_hypothesis: dict[str, Any] = {
+        "items": [],
+        "summary": "",
+        "rationale": "",
+        "uncertainty": "",
+        "mode": "LOCAL",
+        "shadow_note": "Experimental output in shadow mode. It does not modify current score or status.",
+    }
+    llm_sections: dict[str, Any] = {}
+    if allow_generated_text:
+        try:
+            llm_hypothesis = get_or_generate_llm_hypothesis(
+                db,
+                assessment_id=int(assessment_id),
+                risk_id=int(rid),
+                primary_risk_type=str(primary_risk_type or ""),
+                risk_type=row_risk_type,
+                likelihood=str(likelihood).upper(),
+                impact_band=str(impact_band).upper(),
+                evidence_strength=str(evidence_strength).upper(),
+                confidence=int(conf),
+                evidence=list(risk_evidence_pool or []),
+            )
+        except Exception:
+            logger.exception("Failed to build LLM shadow hypotheses for assessment %s risk %s", assessment_id, rid)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        try:
+            llm_why_seed = " ".join(str(llm_hypothesis.get("summary", "")).split()).strip()
+            if not llm_why_seed:
+                llm_why_seed = " ".join(str((llm_hypothesis.get("items") or [""])[0]).split()).strip()
+            llm_sections = get_or_generate_llm_risk_sections(
+                db,
+                assessment_id=int(assessment_id),
+                risk_id=int(rid),
+                primary_risk_type=str(primary_risk_type or ""),
+                risk_type=row_risk_type,
+                likelihood=str(likelihood).upper(),
+                impact_band=str(impact_band).upper(),
+                evidence_strength=str(evidence_strength).upper(),
+                confidence=int(conf),
+                why_it_matters=llm_why_seed,
+                contradictions=list(contradictions or []),
+                base_timeline=list(abuse_path_steps_for_how or []),
+                evidence=list(risk_evidence_pool or []),
+            )
+        except Exception:
+            logger.exception("Failed to build LLM risk sections for assessment %s risk %s", assessment_id, rid)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    llm_why = " ".join(str(llm_hypothesis.get("summary", "")).split()).strip()
+    if not llm_why:
+        llm_why = " ".join(str((llm_hypothesis.get("items") or [""])[0]).split()).strip()
+    if not llm_why:
+        llm_why = " ".join(str((llm_sections or {}).get("why_it_matters", "")).split()).strip()
+    if llm_why:
+        risk_reasoning["why_it_matters"] = llm_why
+        risk_reasoning["why"] = llm_why
+
+    llm_how = " ".join(str((llm_sections or {}).get("how", "")).split()).strip()
+    how_struct: dict[str, Any] = {}
+    how_items = _how_hypotheses_with_codes(list(llm_hypothesis.get("items") or []), coded_signal_refs)
+    if how_items:
+        how_struct = {
+            "items": how_items,
+            "rationale": " ".join(str(llm_hypothesis.get("rationale", "")).split()).strip(),
+            "uncertainty": " ".join(str(llm_hypothesis.get("uncertainty", "")).split()).strip(),
+        }
+    elif llm_how:
+        fallback_item = _how_hypotheses_with_codes([llm_how], coded_signal_refs)
+        if fallback_item:
+            how_struct = {
+                "items": fallback_item[:1],
+                "rationale": "",
+                "uncertainty": "",
+            }
+    if how_struct and list(how_struct.get("items") or []):
+        risk_reasoning["how_struct"] = how_struct
+        risk_reasoning["how"] = ""
+    elif llm_how:
+        risk_reasoning["how"] = _inject_evidence_codes_in_how(llm_how, coded_signal_refs)
+
+    llm_business_impact = " ".join(str((llm_sections or {}).get("business_impact", "")).split()).strip()
+    if llm_business_impact:
+        business_impact_text = llm_business_impact
+    base_why_for_combine = " ".join(str(risk_reasoning.get("why_it_matters", "")).split()).strip()
+    if llm_why:
+        base_why_for_combine = llm_why
+    if base_why_for_combine and business_impact_text:
+        low_why = base_why_for_combine.lower()
+        low_bi = business_impact_text.lower()
+        if low_bi not in low_why:
+            sep = "" if base_why_for_combine.endswith((".", "!", "?")) else "."
+            combined = f"{base_why_for_combine}{sep} {business_impact_text}".strip()
+            risk_reasoning["why_it_matters"] = combined
+            risk_reasoning["why"] = combined
+
+    how_for_title = " ".join(str(risk_reasoning.get("how", "")).split()).strip()
+    if how_struct and list(how_struct.get("items") or []):
+        how_bits = [" ".join(str(x).split()).strip() for x in list(how_struct.get("items") or [])[:2] if str(x).strip()]
+        rationale_text = " ".join(str(how_struct.get("rationale", "")).split()).strip()
+        if rationale_text:
+            how_bits.append(rationale_text)
+        how_for_title = " ".join(how_bits).strip()
+    contextual_headline = _contextual_risk_headline(
+        primary_risk_type=primary_risk_type,
+        fallback_outcome=outcome,
+        risk_vector_summary=risk_vector_summary,
+        why_it_matters=str(risk_reasoning.get("why_it_matters", "") or ""),
+        how_text=how_for_title,
+        business_impact=business_impact_text,
+    )
+    if contextual_headline:
+        risk_headline = contextual_headline
+        risk["headline"] = contextual_headline
+        risk["title"] = contextual_headline
 
     # Lightweight CTI tags (heuristic, defensive-only): chips for stakeholders.
     campaign_chips, mitre_chips = _cti_chips_for_risk(
-        risk_type=str(row.risk_type or ""),
+        risk_type=row_risk_type,
         signal_counts=counts,
         signal_coverage=int(diversity),
     )
     risk["campaign_chips"] = campaign_chips[:6]
-    risk["mitre_chips"] = mitre_chips[:6]
+    llm_mitre = [
+        " ".join(str(x).split()).strip().upper()
+        for x in list((llm_sections or {}).get("mitre_categories") or [])
+        if " ".join(str(x).split()).strip()
+    ][:6]
+    risk["mitre_chips"] = llm_mitre if llm_mitre else mitre_chips[:6]
 
-    assumptions = from_json(row.assumptions_json or "[]", [])
+    assumptions = from_json(row_assumptions_json, [])
     if not isinstance(assumptions, list):
         assumptions = []
-    gaps = from_json(row.gaps_to_verify_json or "[]", [])
+    gaps = from_json(row_gaps_to_verify_json, [])
     if not isinstance(gaps, list):
         gaps = []
-    actions = from_json(row.defensive_actions_json or "[]", [])
+    actions = from_json(row_defensive_actions_json, [])
     if not isinstance(actions, list):
         actions = []
+
+    confirm_points_out = list(confirm_points or [])
+    deny_points_out = list(deny_points or [])
+    control_points_out = _control_points_from_actions(list(actions or []), contradictions=contradictions)
+
+    llm_confirm = [
+        " ".join(str(x).split()).strip()
+        for x in list((llm_sections or {}).get("confirm_points") or [])
+        if " ".join(str(x).split()).strip()
+    ][:4]
+    llm_deny = [
+        " ".join(str(x).split()).strip()
+        for x in list((llm_sections or {}).get("deny_points") or [])
+        if " ".join(str(x).split()).strip()
+    ][:4]
+    llm_control_rows = list((llm_sections or {}).get("control_points") or [])
+    if llm_confirm:
+        confirm_points_out = llm_confirm
+    if llm_deny:
+        deny_points_out = llm_deny
+    if llm_control_rows:
+        mapped_cp: list[dict[str, Any]] = []
+        for idx, cp in enumerate(llm_control_rows, start=1):
+            if not isinstance(cp, dict):
+                continue
+            title = " ".join(str(cp.get("title", "")).split()).strip()
+            if not title:
+                continue
+            effort = " ".join(str(cp.get("effort", "MED")).split()).strip().upper() or "MED"
+            expected = " ".join(str(cp.get("expected_reduction", "MED")).split()).strip().upper() or "MED"
+            if effort not in {"LOW", "MED", "HIGH"}:
+                effort = "MED"
+            if expected not in {"LOW", "MED", "HIGH"}:
+                expected = "MED"
+            mapped_cp.append(
+                {
+                    "id": f"cp-llm-{idx}",
+                    "title": title[:220],
+                    "effort": effort,
+                    "expected_reduction": expected,
+                    "tooltip_reason": "LLM-generated control point from validated evidence.",
+                    "is_contradiction": "contradiction" in title.lower(),
+                }
+            )
+            if len(mapped_cp) >= 5:
+                break
+        if mapped_cp:
+            control_points_out = mapped_cp
 
     details = {
         "exec_brief": exec_brief,
         "business_impact": business_impact_text,
-        "confirm_points": confirm_points,
-        "deny_points": deny_points,
-        "control_points": _control_points_from_actions(list(actions or [])),
+        "impacted_roles": impacted_roles,
+        "llm_hypothesis": llm_hypothesis,
+        "llm_sections": llm_sections,
+        "contradictions_to_mitigate": contradictions,
+        "confirm_points": confirm_points_out,
+        "deny_points": deny_points_out,
+        "control_points": control_points_out,
         "evidence": (evidence_sets.get(f"risk:{rid}", [])[:18] or _limited_evidence_placeholder()),
         "assumptions": list(assumptions or []),
         "gaps": list(gaps or []),
@@ -4342,7 +4979,24 @@ def build_risk_detail_viewmodel(
             }
         )
     story_abuse_path = []
-    for idx, step in enumerate((risk.get("timeline") or [])[:6], start=1):
+    abuse_source_steps = list((llm_sections or {}).get("abuse_path") or [])[:6]
+    if abuse_source_steps:
+        normalized_llm_steps: list[dict[str, Any]] = []
+        for idx, step in enumerate(abuse_source_steps, start=1):
+            if not isinstance(step, dict):
+                continue
+            normalized_llm_steps.append(
+                {
+                    "step_index": int(step.get("step") or idx),
+                    "title": str(step.get("title", "")).strip(),
+                    "brief": str(step.get("detail", "")).strip(),
+                }
+            )
+        source_steps = normalized_llm_steps if normalized_llm_steps else list((risk.get("timeline") or [])[:6])
+    else:
+        source_steps = list((risk.get("timeline") or [])[:6])
+
+    for idx, step in enumerate(source_steps, start=1):
         if not isinstance(step, dict):
             continue
         step_title = str(step.get("title", ""))[:90]
@@ -4350,7 +5004,7 @@ def build_risk_detail_viewmodel(
         step_set_id = f"step:{rid}:{idx}"
         evidence_sets[step_set_id] = _focused_evidence_subset(
             risk_evidence_pool,
-            seed_texts=[step_title, step_detail, str(primary_risk_type or ""), str(row.risk_type or "")],
+            seed_texts=[step_title, step_detail, str(primary_risk_type or ""), row_risk_type],
             max_items=8,
         )
         story_abuse_path.append(
@@ -4366,10 +5020,10 @@ def build_risk_detail_viewmodel(
     evidence_sets[impact_primary_set_id] = _focused_evidence_subset(
         risk_evidence_pool,
         seed_texts=[
-            str(row.impact_rationale or ""),
-            str(row.description or ""),
+            row_impact_rationale,
+            row_description,
             str(primary_risk_type or ""),
-            str(row.risk_type or ""),
+            row_risk_type,
         ],
         max_items=8,
     )
@@ -4389,7 +5043,7 @@ def build_risk_detail_viewmodel(
         {
             "id": "impact:primary",
             "title": "Business impact",
-            "detail": _first_sentence(str(row.impact_rationale or row.description or ""), max_chars=360),
+            "detail": _first_sentence(str(row_impact_rationale or row_description or ""), max_chars=360),
             "icon": "target",
             "evidence_set_id": impact_primary_set_id,
         },

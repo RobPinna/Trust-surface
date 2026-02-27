@@ -78,6 +78,8 @@ IMPACT_KEYWORDS = (
     "reputational damage",
 )
 RISK_BRIEF_SAFETY_FILTER_ENABLED = os.getenv("RISK_BRIEF_SAFETY_FILTER", "0").strip() == "1"
+LLM_HYPOTHESIS_PROMPT_VERSION = "2026-02-27-hypothesis-v2"
+LLM_SECTIONS_PROMPT_VERSION = "2026-02-27-sections-v1"
 
 
 @dataclass(frozen=True)
@@ -782,6 +784,7 @@ def _hash_how_input(
 ) -> str:
     blob = json.dumps(
         {
+            "prompt_version": LLM_HYPOTHESIS_PROMPT_VERSION,
             "assessment_id": int(assessment_id),
             "risk_id": int(risk_id),
             "primary_risk_type": str(primary_risk_type or ""),
@@ -1018,3 +1021,973 @@ def get_or_generate_how_text(
     db.add(row)
     db.commit()
     return how_text
+
+
+def _sanitize_hypothesis_line(text: str, *, max_chars: int = 220) -> str:
+    out = " ".join(str(text or "").split()).strip()
+    out = re.sub(r"^[\-\*\d\.\)\s]+", "", out).strip()
+    out = out.strip("\"' ")
+    out = _rewrite_abstract_terms(out)
+    if _contains_prohibited(out):
+        return ""
+    return out[:max_chars]
+
+
+def _normalize_llm_hypothesis_evidence(
+    evidence: list[dict[str, Any]],
+    *,
+    max_items: int = 48,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ev in evidence or []:
+        if not isinstance(ev, dict):
+            continue
+        snippet = _sanitize_hypothesis_line(str(ev.get("snippet", "")), max_chars=260)
+        title = _sanitize_hypothesis_line(str(ev.get("title", "")), max_chars=120)
+        signal_type = " ".join(str(ev.get("signal_type", "")).split()).strip().upper() or "UNCLASSIFIED"
+        url = " ".join(str(ev.get("canonical_url", "") or ev.get("url", "")).split()).strip()[:240]
+        domain = " ".join(str(ev.get("domain", "")).split()).strip()[:120]
+        connectors = ev.get("connectors", [])
+        if isinstance(connectors, list):
+            conn_raw = ",".join(
+                " ".join(str(x or "").split()).strip() for x in connectors if " ".join(str(x or "").split()).strip()
+            )
+        else:
+            conn_raw = " ".join(str(ev.get("connector", "")).split()).strip()
+        connector = conn_raw[:120]
+        try:
+            confidence = int(ev.get("confidence", 50) or 50)
+        except Exception:
+            confidence = 50
+        dedupe_key = f"{signal_type}|{url.lower()}|{snippet.lower()[:120]}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        candidates.append(
+            {
+                "signal_type": signal_type,
+                "title": title,
+                "snippet": snippet,
+                "url": url,
+                "domain": domain,
+                "connector": connector,
+                "confidence": max(1, min(100, int(confidence))),
+            }
+        )
+    candidates.sort(
+        key=lambda x: (
+            str(x.get("signal_type", "")),
+            str(x.get("url", "")),
+            -int(x.get("confidence", 0) or 0),
+            str(x.get("title", "")),
+            str(x.get("snippet", "")),
+        )
+    )
+    return candidates[:max(1, int(max_items))]
+
+
+def _safe_hypothesis_items(raw: Any, *, max_items: int = 4) -> list[str]:
+    items: list[str] = []
+    for x in (raw or []):
+        line = _sanitize_hypothesis_line(str(x or ""), max_chars=220)
+        if not line:
+            continue
+        if line in items:
+            continue
+        items.append(line)
+        if len(items) >= max_items:
+            break
+    return items
+
+
+def _parse_llm_hypothesis_blob(blob: str) -> dict[str, Any] | None:
+    text = str(blob or "").strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            return None
+        items = _safe_hypothesis_items(payload.get("items") or payload.get("hypotheses") or [])
+        rationale = _sanitize_hypothesis_line(str(payload.get("rationale", "")), max_chars=260)
+        uncertainty = _sanitize_hypothesis_line(str(payload.get("uncertainty", "")), max_chars=260)
+        mode = " ".join(str(payload.get("mode", "LOCAL")).split()).strip().upper() or "LOCAL"
+        if mode not in {"LLM", "LOCAL"}:
+            mode = "LOCAL"
+        if not items:
+            return None
+        summary = _sanitize_hypothesis_line(
+            str(payload.get("summary", "")).strip() or str(items[0] if items else ""),
+            max_chars=280,
+        )
+        return {
+            "items": items,
+            "summary": summary,
+            "rationale": rationale,
+            "uncertainty": uncertainty,
+            "mode": mode,
+            "shadow_note": "Experimental output in shadow mode. It does not modify current score or status.",
+        }
+    except Exception:
+        line = _sanitize_hypothesis_line(text, max_chars=260)
+        if not line:
+            return None
+        return {
+            "items": [line],
+            "summary": line,
+            "rationale": "",
+            "uncertainty": "",
+            "mode": "LOCAL",
+            "shadow_note": "Experimental output in shadow mode. It does not modify current score or status.",
+        }
+
+
+def _hash_llm_hypothesis_input(
+    *,
+    assessment_id: int,
+    risk_id: int,
+    primary_risk_type: str,
+    risk_type: str,
+    likelihood: str,
+    impact_band: str,
+    evidence_strength: str,
+    confidence: int,
+    evidence_norm: list[dict[str, Any]],
+) -> str:
+    blob = json.dumps(
+        {
+            "assessment_id": int(assessment_id),
+            "risk_id": int(risk_id),
+            "primary_risk_type": str(primary_risk_type or ""),
+            "risk_type": str(risk_type or ""),
+            "likelihood": str(likelihood or ""),
+            "impact_band": str(impact_band or ""),
+            "evidence_strength": str(evidence_strength or ""),
+            "confidence": int(confidence or 0),
+            "evidence": evidence_norm[:48],
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _local_llm_hypothesis_payload(
+    *,
+    primary_risk_type: str,
+    risk_type: str,
+    likelihood: str,
+    impact_band: str,
+    evidence_norm: list[dict[str, Any]],
+) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    artifacts: list[str] = []
+    for ev in evidence_norm:
+        st = str(ev.get("signal_type", "UNCLASSIFIED")).strip().upper()
+        counts[st] = counts.get(st, 0) + 1
+        for token in (str(ev.get("domain", "")), str(ev.get("title", ""))):
+            token = " ".join(str(token or "").split()).strip()
+            if token and token not in artifacts:
+                artifacts.append(token)
+            if len(artifacts) >= 6:
+                break
+
+    items: list[str] = []
+    if counts.get("CONTACT_CHANNEL", 0) > 0 and counts.get("PROCESS_CUE", 0) > 0:
+        items.append(
+            "An external actor could impersonate official support/billing conversations and blend into routine process requests."
+        )
+    if counts.get("ORG_CUE", 0) > 0:
+        items.append("Visible role cues could enable targeted social requests toward staff with operational authority.")
+    if counts.get("VENDOR_CUE", 0) > 0 or counts.get("INFRA_CUE", 0) > 0:
+        items.append("Public vendor or infrastructure cues could make fake portal/helpdesk interactions appear legitimate.")
+    if counts.get("EXTERNAL_ATTENTION", 0) > 0:
+        items.append("External narrative pressure could increase urgency and reduce verification quality in inbound requests.")
+    if not items:
+        label = str(primary_risk_type or risk_type or "trust-risk").strip().lower()
+        items.append(
+            f"Observed public signals could support a plausible {label} scenario if verification controls are inconsistent."
+        )
+
+    rationale = (
+        f"Derived from {len(evidence_norm)} evidence items across {len([k for k, v in counts.items() if v > 0])} signal types."
+    )
+    if artifacts:
+        rationale += f" Strongest recurring cues include {', '.join(artifacts[:3])}."
+    uncertainty = (
+        f"Likelihood is {str(likelihood or 'MED').upper()} and impact is {str(impact_band or 'MED').upper()}; "
+        "this remains a defensive hypothesis, not confirmation of active abuse."
+    )
+    safe_items = _safe_hypothesis_items(items, max_items=4)
+    summary = _sanitize_hypothesis_line(str(safe_items[0] if safe_items else ""), max_chars=280)
+    return {
+        "items": safe_items,
+        "summary": summary,
+        "rationale": _sanitize_hypothesis_line(rationale, max_chars=260),
+        "uncertainty": _sanitize_hypothesis_line(uncertainty, max_chars=260),
+        "mode": "LOCAL",
+        "shadow_note": "Experimental output in shadow mode. It does not modify current score or status.",
+    }
+
+
+def _call_llm_risk_hypothesis(
+    *,
+    api_key: str,
+    model: str,
+    primary_risk_type: str,
+    risk_type: str,
+    likelihood: str,
+    impact_band: str,
+    evidence_strength: str,
+    confidence: int,
+    evidence_norm: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    ctx = {
+        "primary_risk_type": str(primary_risk_type or ""),
+        "risk_type": str(risk_type or ""),
+        "likelihood": str(likelihood or ""),
+        "impact_band": str(impact_band or ""),
+        "evidence_strength": str(evidence_strength or ""),
+        "confidence": int(confidence or 0),
+        "evidence": evidence_norm[:48],
+    }
+    system_prompt = (
+        "You are a defensive CTI analyst. "
+        "Produce risk hypotheses only from provided evidence. "
+        "Do not provide exploit steps, lures, scripts, or operational attack instructions."
+    )
+    user_prompt = (
+        "Create 2-4 concise, evidence-grounded hypotheses about possible trust/social-engineering abuse paths.\n"
+        "Return JSON only with keys:\n"
+        "- hypotheses: array of short strings\n"
+        "- rationale: one sentence about why these hypotheses are plausible from evidence\n"
+        "- uncertainty: one sentence describing limits/uncertainty\n"
+        "Rules:\n"
+        "- Use only supplied evidence; do not invent entities/channels.\n"
+        "- Keep each hypothesis <= 170 characters.\n"
+        "- Defensive language only; no actionable abuse guidance.\n\n"
+        "JSON context:\n"
+        + json.dumps(ctx, ensure_ascii=True)
+    )
+    payload = {
+        "model": model,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        res = _post_llm_with_backoff(
+            url="https://api.openai.com/v1/chat/completions",
+            payload=payload,
+            headers=headers,
+            timeout_seconds=35,
+            caller="RiskHypothesis",
+        )
+        if res is None or int(res.status_code or 0) >= 400:
+            if res is not None and int(res.status_code or 0) >= 400:
+                logger.warning("Risk hypothesis LLM request failed: status=%s", res.status_code)
+            return None
+        body = res.json()
+        content = body.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        parsed = json.loads(str(content or "{}"))
+        if not isinstance(parsed, dict):
+            return None
+        items = _safe_hypothesis_items(parsed.get("hypotheses") or [], max_items=4)
+        if not items:
+            return None
+        summary = _sanitize_hypothesis_line(str(parsed.get("summary", "")).strip() or str(items[0]), max_chars=280)
+        rationale = _sanitize_hypothesis_line(str(parsed.get("rationale", "")), max_chars=260)
+        uncertainty = _sanitize_hypothesis_line(str(parsed.get("uncertainty", "")), max_chars=260)
+        return {
+            "items": items,
+            "summary": summary,
+            "rationale": rationale,
+            "uncertainty": uncertainty,
+            "mode": "LLM",
+            "shadow_note": "Experimental output in shadow mode. It does not modify current score or status.",
+        }
+    except Exception:
+        logger.exception("Risk hypothesis LLM request failed unexpectedly")
+        return None
+
+
+def get_or_generate_llm_hypothesis(
+    db: Session,
+    *,
+    assessment_id: int,
+    risk_id: int,
+    primary_risk_type: str,
+    risk_type: str,
+    likelihood: str,
+    impact_band: str,
+    evidence_strength: str,
+    confidence: int,
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    evidence_norm = _normalize_llm_hypothesis_evidence(evidence, max_items=48)
+    if len(evidence_norm) < 2:
+        return {
+            "items": [],
+            "summary": "",
+            "rationale": "",
+            "uncertainty": "Insufficient evidence volume for additional LLM hypotheses.",
+            "mode": "LOCAL",
+            "shadow_note": "Experimental output in shadow mode. It does not modify current score or status.",
+        }
+
+    input_hash = _hash_llm_hypothesis_input(
+        assessment_id=int(assessment_id),
+        risk_id=int(risk_id),
+        primary_risk_type=str(primary_risk_type or ""),
+        risk_type=str(risk_type or ""),
+        likelihood=str(likelihood or ""),
+        impact_band=str(impact_band or ""),
+        evidence_strength=str(evidence_strength or ""),
+        confidence=int(confidence or 0),
+        evidence_norm=evidence_norm,
+    )
+    existing = (
+        db.execute(
+            select(RiskBrief)
+            .where(
+                RiskBrief.assessment_id == int(assessment_id),
+                RiskBrief.risk_kind == "scenario_llm_hypothesis",
+                RiskBrief.risk_id == int(risk_id),
+                RiskBrief.input_hash == input_hash,
+            )
+            .order_by(RiskBrief.created_at.desc(), RiskBrief.id.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    if existing and str(existing.brief or "").strip():
+        cached = _parse_llm_hypothesis_blob(str(existing.brief or ""))
+        if cached:
+            return cached
+
+    llm_cfg = get_llm_runtime_config(db)
+    model = str(llm_cfg.get("model") or "LOCAL").strip()
+    api_key = str(llm_cfg.get("api_key") or "").strip()
+    is_local = model.upper() == "LOCAL" or not api_key
+
+    payload: dict[str, Any] | None = None
+    if not is_local:
+        payload = _call_llm_risk_hypothesis(
+            api_key=api_key,
+            model=model,
+            primary_risk_type=primary_risk_type,
+            risk_type=risk_type,
+            likelihood=likelihood,
+            impact_band=impact_band,
+            evidence_strength=evidence_strength,
+            confidence=confidence,
+            evidence_norm=evidence_norm,
+        )
+    if not payload:
+        payload = _local_llm_hypothesis_payload(
+            primary_risk_type=primary_risk_type,
+            risk_type=risk_type,
+            likelihood=likelihood,
+            impact_band=impact_band,
+            evidence_norm=evidence_norm,
+        )
+
+    if not isinstance(payload, dict):
+        payload = {
+            "items": [],
+            "summary": "",
+            "rationale": "",
+            "uncertainty": "",
+            "mode": "LOCAL",
+            "shadow_note": "Experimental output in shadow mode. It does not modify current score or status.",
+        }
+    payload["mode"] = "LLM" if str(payload.get("mode", "LOCAL")).upper() == "LLM" and not is_local else "LOCAL"
+    payload["items"] = _safe_hypothesis_items(payload.get("items") or [], max_items=4)
+    payload["summary"] = _sanitize_hypothesis_line(
+        str(payload.get("summary", "")).strip() or str((payload.get("items") or [""])[0]),
+        max_chars=280,
+    )
+    payload["rationale"] = _sanitize_hypothesis_line(str(payload.get("rationale", "")), max_chars=260)
+    payload["uncertainty"] = _sanitize_hypothesis_line(str(payload.get("uncertainty", "")), max_chars=260)
+    payload["shadow_note"] = "Experimental output in shadow mode. It does not modify current score or status."
+
+    if payload.get("items"):
+        row = RiskBrief(
+            assessment_id=int(assessment_id),
+            risk_kind="scenario_llm_hypothesis",
+            risk_id=int(risk_id),
+            input_hash=input_hash,
+            model=("LOCAL" if is_local else str(model or "LOCAL"))[:64],
+            brief=json.dumps(payload, ensure_ascii=True),
+        )
+        try:
+            db.add(row)
+            db.commit()
+        except Exception:
+            logger.exception(
+                "Failed to persist LLM shadow hypotheses for assessment=%s risk=%s",
+                int(assessment_id),
+                int(risk_id),
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    return payload
+
+
+def _safe_section_line(text: str, *, max_chars: int = 260) -> str:
+    out = _sanitize_hypothesis_line(text, max_chars=max_chars)
+    if not out:
+        return ""
+    return out
+
+
+def _safe_section_points(raw: Any, *, max_items: int = 4, max_chars: int = 180) -> list[str]:
+    out: list[str] = []
+    for item in (raw or []):
+        line = _safe_section_line(str(item or ""), max_chars=max_chars)
+        if not line:
+            continue
+        if line in out:
+            continue
+        out.append(line)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _normalize_effort(value: str, title: str = "") -> str:
+    v = " ".join(str(value or "").split()).strip().upper()
+    if v in {"LOW", "MED", "HIGH"}:
+        return v
+    t = str(title or "").lower()
+    if any(k in t for k in ("enforce", "mandatory", "approval", "process redesign", "policy update")):
+        return "MED"
+    return "LOW"
+
+
+def _normalize_reduction(value: str, title: str = "") -> str:
+    v = " ".join(str(value or "").split()).strip().upper()
+    if v in {"LOW", "MED", "HIGH"}:
+        return v
+    t = str(title or "").lower()
+    if any(k in t for k in ("block", "deny", "out-of-band", "verification", "approval", "registry")):
+        return "HIGH"
+    if any(k in t for k in ("train", "awareness", "guidance")):
+        return "MED"
+    return "MED"
+
+
+def _safe_control_points(raw: Any, *, max_items: int = 5) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        title = ""
+        effort = "MED"
+        reduction = "MED"
+        if isinstance(item, dict):
+            title = _safe_section_line(str(item.get("title", "")), max_chars=220)
+            effort = _normalize_effort(str(item.get("effort", "")), title=title)
+            reduction = _normalize_reduction(str(item.get("expected_reduction", "")), title=title)
+        else:
+            title = _safe_section_line(str(item or ""), max_chars=220)
+            effort = _normalize_effort("", title=title)
+            reduction = _normalize_reduction("", title=title)
+        if not title:
+            continue
+        if any(title == str(x.get("title", "")) for x in out):
+            continue
+        out.append(
+            {
+                "title": title,
+                "effort": effort,
+                "expected_reduction": reduction,
+            }
+        )
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _safe_mitre_codes(raw: Any, *, max_items: int = 6) -> list[str]:
+    out: list[str] = []
+    if isinstance(raw, str):
+        raw_items: list[str] = [raw]
+    elif isinstance(raw, list):
+        raw_items = [str(x or "") for x in raw]
+    else:
+        raw_items = []
+    for item in raw_items:
+        text = " ".join(str(item or "").split()).strip().upper()
+        if not text:
+            continue
+        found = re.findall(r"\b(?:TA\d{4}|T\d{4}(?:\.\d{3})?)\b", text)
+        if not found and re.fullmatch(r"[A-Z0-9 .:_/\-]{3,40}", text):
+            found = [text]
+        for code in found:
+            clean = " ".join(str(code).split()).strip().upper()
+            if not clean or clean in out:
+                continue
+            out.append(clean)
+            if len(out) >= max_items:
+                return out
+    return out
+
+
+def _safe_abuse_path_steps(raw: Any, *, max_items: int = 6) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    if not isinstance(raw, list):
+        return out
+    for idx, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            continue
+        title = _safe_section_line(str(item.get("title", "")), max_chars=96)
+        detail = _safe_section_line(str(item.get("detail", "")), max_chars=200)
+        if not title and not detail:
+            continue
+        if not title:
+            title = f"Step {len(out) + 1}"
+        out.append(
+            {
+                "step": str(item.get("step") or len(out) + 1),
+                "title": title,
+                "detail": detail,
+            }
+        )
+        if len(out) >= max_items:
+            break
+    for idx, row in enumerate(out, start=1):
+        row["step"] = str(idx)
+    return out
+
+
+def _hash_llm_sections_input(
+    *,
+    assessment_id: int,
+    risk_id: int,
+    primary_risk_type: str,
+    risk_type: str,
+    likelihood: str,
+    impact_band: str,
+    evidence_strength: str,
+    confidence: int,
+    why_it_matters: str,
+    contradictions: list[str],
+    base_timeline: list[dict[str, str]],
+    evidence_norm: list[dict[str, Any]],
+) -> str:
+    blob = json.dumps(
+        {
+            "prompt_version": LLM_SECTIONS_PROMPT_VERSION,
+            "assessment_id": int(assessment_id),
+            "risk_id": int(risk_id),
+            "primary_risk_type": str(primary_risk_type or ""),
+            "risk_type": str(risk_type or ""),
+            "likelihood": str(likelihood or ""),
+            "impact_band": str(impact_band or ""),
+            "evidence_strength": str(evidence_strength or ""),
+            "confidence": int(confidence or 0),
+            "why_it_matters": str(why_it_matters or ""),
+            "contradictions": [str(x) for x in (contradictions or []) if str(x).strip()][:5],
+            "base_timeline": base_timeline[:6],
+            "evidence": evidence_norm[:48],
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _parse_llm_sections_blob(blob: str) -> dict[str, Any] | None:
+    raw = str(blob or "").strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    why_it_matters = _safe_section_line(str(payload.get("why_it_matters", "")), max_chars=320)
+    how = _sanitize_how_text(str(payload.get("how", "")))
+    business_impact = _safe_section_line(str(payload.get("business_impact", "")), max_chars=420)
+    confirm_points = _safe_section_points(payload.get("confirm_points") or [], max_items=4, max_chars=190)
+    deny_points = _safe_section_points(payload.get("deny_points") or [], max_items=4, max_chars=190)
+    control_points = _safe_control_points(payload.get("control_points") or [], max_items=5)
+    mitre_categories = _safe_mitre_codes(
+        payload.get("mitre_categories") or payload.get("mitre_attack_categories") or [],
+        max_items=6,
+    )
+    abuse_path = _safe_abuse_path_steps(
+        payload.get("abuse_path") or payload.get("abuse_path_steps") or [],
+        max_items=6,
+    )
+    mode = " ".join(str(payload.get("mode", "LOCAL")).split()).strip().upper() or "LOCAL"
+    if mode not in {"LLM", "LOCAL"}:
+        mode = "LOCAL"
+    if not why_it_matters:
+        return None
+    return {
+        "why_it_matters": why_it_matters,
+        "how": how,
+        "business_impact": business_impact,
+        "confirm_points": confirm_points,
+        "deny_points": deny_points,
+        "control_points": control_points,
+        "mitre_categories": mitre_categories,
+        "abuse_path": abuse_path,
+        "mode": mode,
+        "shadow_note": "Generated from evidence with stable prompts and cache.",
+    }
+
+
+def _local_llm_sections_payload(
+    *,
+    why_it_matters: str,
+    primary_risk_type: str,
+    risk_type: str,
+    likelihood: str,
+    impact_band: str,
+    contradictions: list[str],
+    base_timeline: list[dict[str, str]],
+    evidence_norm: list[dict[str, Any]],
+) -> dict[str, Any]:
+    why = _safe_section_line(str(why_it_matters or ""), max_chars=320)
+    if not why:
+        label = str(primary_risk_type or risk_type or "trust risk").strip().lower()
+        why = f"Publicly observable signals indicate a plausible {label} path if verification controls are not consistently enforced."
+
+    evidence_bits: list[str] = []
+    for ev in evidence_norm[:6]:
+        st = str(ev.get("signal_type", "")).strip().upper()
+        dom = str(ev.get("domain", "")).strip()
+        if st and dom:
+            token = f"{st.lower()} on {dom}"
+        elif st:
+            token = st.lower()
+        else:
+            token = str(ev.get("title", "")).strip().lower()
+        token = " ".join(token.split()).strip()
+        if token and token not in evidence_bits:
+            evidence_bits.append(token)
+        if len(evidence_bits) >= 3:
+            break
+
+    evidence_hint = ", ".join(evidence_bits) if evidence_bits else "multiple public trust-related signals"
+    how = (
+        f"A malicious actor would likely start from {evidence_hint} to identify a believable contact path, "
+        f"then align the message with routine workflow language to reduce suspicion. "
+        f"They could progress from low-friction interaction to a higher-impact request once trust is established, "
+        f"especially if independent verification is skipped under urgency. "
+        f"This path remains a defensive hypothesis based on current evidence."
+    )
+    how = _sanitize_how_text(how)
+
+    business_impact = (
+        f"If successful, this could cause trust erosion, operational disruption, and potentially financial loss. "
+        f"Current risk posture is likelihood {str(likelihood or 'MED').upper()} with impact {str(impact_band or 'MED').upper()}."
+    )
+    business_impact = _safe_section_line(business_impact, max_chars=420)
+
+    confirm_points = [
+        "Suspicious requests reusing official channel/process wording are observed in external interactions.",
+        "Sensitive workflow actions are initiated from channels not listed as authoritative.",
+        "Urgency is used to bypass normal verification or approval steps.",
+    ]
+    deny_points = [
+        "A single authoritative channel registry is published and consistently referenced.",
+        "Sensitive requests are blocked unless verified out-of-band and approved by policy.",
+        "Users and partners consistently reject off-channel or identity-ambiguous requests.",
+    ]
+    control_points: list[dict[str, str]] = [
+        {"title": "Enforce out-of-band verification for sensitive requests", "effort": "MED", "expected_reduction": "HIGH"},
+        {"title": "Publish and maintain one official channel registry", "effort": "LOW", "expected_reduction": "HIGH"},
+        {"title": "Require approval gates for high-impact workflow changes", "effort": "MED", "expected_reduction": "HIGH"},
+    ]
+    if contradictions:
+        control_points.insert(
+            0,
+            {
+                "title": f"Resolve contradiction: {str(contradictions[0])[:180]}",
+                "effort": "MED",
+                "expected_reduction": "HIGH",
+            },
+        )
+
+    rt = str(risk_type or "").strip().lower()
+    primary = str(primary_risk_type or "").strip().lower()
+    mitre_categories: list[str] = []
+    if any(k in f"{rt} {primary}" for k in ("impersonation", "social", "phish", "channel", "trust")):
+        mitre_categories.extend(["T1566", "T1598"])
+    if any(k in f"{rt} {primary}" for k in ("credential", "account", "login")):
+        mitre_categories.append("T1078")
+    if any(k in f"{rt} {primary}" for k in ("payment", "invoice", "fraud", "booking", "vendor")):
+        mitre_categories.append("T1656")
+    mitre_categories = _safe_mitre_codes(mitre_categories, max_items=6)
+
+    abuse_path = _safe_abuse_path_steps(base_timeline, max_items=6)
+    if not abuse_path:
+        abuse_path = _safe_abuse_path_steps(
+            [
+                {
+                    "step": "1",
+                    "title": "Recon public trust signals",
+                    "detail": "Collect official channels, role cues, and workflow wording from public sources.",
+                },
+                {
+                    "step": "2",
+                    "title": "Craft credible interaction",
+                    "detail": "Align message with observed process language and expected communication style.",
+                },
+                {
+                    "step": "3",
+                    "title": "Move to sensitive workflow",
+                    "detail": "Escalate from low-friction contact into a request touching payment/account/process actions.",
+                },
+                {
+                    "step": "4",
+                    "title": "Exploit verification gaps",
+                    "detail": "Use urgency or channel ambiguity to bypass out-of-band checks and approvals.",
+                },
+            ],
+            max_items=6,
+        )
+
+    return {
+        "why_it_matters": why,
+        "how": how,
+        "business_impact": business_impact,
+        "confirm_points": _safe_section_points(confirm_points, max_items=4, max_chars=190),
+        "deny_points": _safe_section_points(deny_points, max_items=4, max_chars=190),
+        "control_points": _safe_control_points(control_points, max_items=5),
+        "mitre_categories": mitre_categories,
+        "abuse_path": abuse_path,
+        "mode": "LOCAL",
+        "shadow_note": "Generated from evidence with stable prompts and cache.",
+    }
+
+
+def _call_llm_risk_sections(
+    *,
+    api_key: str,
+    model: str,
+    primary_risk_type: str,
+    risk_type: str,
+    likelihood: str,
+    impact_band: str,
+    evidence_strength: str,
+    confidence: int,
+    why_it_matters: str,
+    contradictions: list[str],
+    base_timeline: list[dict[str, str]],
+    evidence_norm: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    ctx = {
+        "primary_risk_type": str(primary_risk_type or ""),
+        "risk_type": str(risk_type or ""),
+        "likelihood": str(likelihood or ""),
+        "impact_band": str(impact_band or ""),
+        "evidence_strength": str(evidence_strength or ""),
+        "confidence": int(confidence or 0),
+        "why_it_matters": str(why_it_matters or ""),
+        "contradictions": [str(x) for x in (contradictions or []) if str(x).strip()][:5],
+        "base_timeline": base_timeline[:6],
+        "evidence": evidence_norm[:48],
+    }
+    system_prompt = (
+        "You are a defensive CTI analyst writing clear business-facing risk reasoning. "
+        "Only use provided evidence. No exploit instructions, no phishing scripts, no offensive guidance."
+    )
+    user_prompt = (
+        "Return JSON only with keys:\n"
+        "- why_it_matters (1 short paragraph)\n"
+        "- how (1 paragraph, 90-140 words, plausible workflow of a malicious actor)\n"
+        "- business_impact (1-2 concise sentences)\n"
+        "- mitre_categories (array of ATT&CK codes like T1566, T1078, T1598, max 6)\n"
+        "- abuse_path (array 4-6 objects: {step,title,detail})\n"
+        "- confirm_points (array 2-4)\n"
+        "- deny_points (array 2-4)\n"
+        "- control_points (array 3-5 objects: {title, effort[LOW|MED|HIGH], expected_reduction[LOW|MED|HIGH]})\n"
+        "Rules:\n"
+        "- Keep why_it_matters semantically consistent with input why_it_matters.\n"
+        "- Keep language concrete and human.\n"
+        "- Use only evidence in context.\n"
+        "- If contradictions are present, include at least one control point to resolve them.\n"
+        "- abuse_path must reflect a plausible sequence and remain defensive-only.\n"
+        "- No markdown, no bullets outside arrays.\n\n"
+        "JSON context:\n"
+        + json.dumps(ctx, ensure_ascii=True)
+    )
+    payload = {
+        "model": model,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        res = _post_llm_with_backoff(
+            url="https://api.openai.com/v1/chat/completions",
+            payload=payload,
+            headers=headers,
+            timeout_seconds=40,
+            caller="RiskSections",
+        )
+        if res is None or int(res.status_code or 0) >= 400:
+            if res is not None and int(res.status_code or 0) >= 400:
+                logger.warning("Risk sections LLM request failed: status=%s", res.status_code)
+            return None
+        body = res.json()
+        content = body.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        parsed = _parse_llm_sections_blob(str(content or ""))
+        if not parsed:
+            return None
+        parsed["mode"] = "LLM"
+        return parsed
+    except Exception:
+        logger.exception("Risk sections LLM request failed unexpectedly")
+        return None
+
+
+def get_or_generate_llm_risk_sections(
+    db: Session,
+    *,
+    assessment_id: int,
+    risk_id: int,
+    primary_risk_type: str,
+    risk_type: str,
+    likelihood: str,
+    impact_band: str,
+    evidence_strength: str,
+    confidence: int,
+    why_it_matters: str,
+    contradictions: list[str] | None,
+    base_timeline: list[dict[str, str]] | None,
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    evidence_norm = _normalize_llm_hypothesis_evidence(evidence, max_items=48)
+    contradiction_rows = [str(x).strip() for x in (contradictions or []) if str(x).strip()][:5]
+    timeline_rows = _normalize_abuse_path_steps(base_timeline, max_items=6)
+    safe_why = _safe_section_line(str(why_it_matters or ""), max_chars=320)
+    if len(evidence_norm) < 2:
+        return _local_llm_sections_payload(
+            why_it_matters=safe_why,
+            primary_risk_type=primary_risk_type,
+            risk_type=risk_type,
+            likelihood=likelihood,
+            impact_band=impact_band,
+            contradictions=contradiction_rows,
+            base_timeline=timeline_rows,
+            evidence_norm=evidence_norm,
+        )
+
+    input_hash = _hash_llm_sections_input(
+        assessment_id=int(assessment_id),
+        risk_id=int(risk_id),
+        primary_risk_type=str(primary_risk_type or ""),
+        risk_type=str(risk_type or ""),
+        likelihood=str(likelihood or ""),
+        impact_band=str(impact_band or ""),
+        evidence_strength=str(evidence_strength or ""),
+        confidence=int(confidence or 0),
+        why_it_matters=safe_why,
+        contradictions=contradiction_rows,
+        base_timeline=timeline_rows,
+        evidence_norm=evidence_norm,
+    )
+    existing = (
+        db.execute(
+            select(RiskBrief)
+            .where(
+                RiskBrief.assessment_id == int(assessment_id),
+                RiskBrief.risk_kind == "scenario_llm_sections",
+                RiskBrief.risk_id == int(risk_id),
+                RiskBrief.input_hash == input_hash,
+            )
+            .order_by(RiskBrief.created_at.desc(), RiskBrief.id.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    if existing and str(existing.brief or "").strip():
+        cached = _parse_llm_sections_blob(str(existing.brief or ""))
+        if cached:
+            return cached
+
+    llm_cfg = get_llm_runtime_config(db)
+    model = str(llm_cfg.get("model") or "LOCAL").strip()
+    api_key = str(llm_cfg.get("api_key") or "").strip()
+    is_local = model.upper() == "LOCAL" or not api_key
+
+    payload: dict[str, Any] | None = None
+    if not is_local:
+        payload = _call_llm_risk_sections(
+            api_key=api_key,
+            model=model,
+            primary_risk_type=primary_risk_type,
+            risk_type=risk_type,
+            likelihood=likelihood,
+            impact_band=impact_band,
+            evidence_strength=evidence_strength,
+            confidence=confidence,
+            why_it_matters=safe_why,
+            contradictions=contradiction_rows,
+            base_timeline=timeline_rows,
+            evidence_norm=evidence_norm,
+        )
+    if not payload:
+        payload = _local_llm_sections_payload(
+            why_it_matters=safe_why,
+            primary_risk_type=primary_risk_type,
+            risk_type=risk_type,
+            likelihood=likelihood,
+            impact_band=impact_band,
+            contradictions=contradiction_rows,
+            base_timeline=timeline_rows,
+            evidence_norm=evidence_norm,
+        )
+
+    payload["mode"] = "LLM" if str(payload.get("mode", "LOCAL")).upper() == "LLM" and not is_local else "LOCAL"
+    payload["why_it_matters"] = _safe_section_line(str(payload.get("why_it_matters", "") or safe_why), max_chars=320)
+    payload["how"] = _sanitize_how_text(str(payload.get("how", "")))
+    payload["business_impact"] = _safe_section_line(str(payload.get("business_impact", "")), max_chars=420)
+    payload["confirm_points"] = _safe_section_points(payload.get("confirm_points") or [], max_items=4, max_chars=190)
+    payload["deny_points"] = _safe_section_points(payload.get("deny_points") or [], max_items=4, max_chars=190)
+    payload["control_points"] = _safe_control_points(payload.get("control_points") or [], max_items=5)
+    payload["mitre_categories"] = _safe_mitre_codes(payload.get("mitre_categories") or [], max_items=6)
+    payload["abuse_path"] = _safe_abuse_path_steps(payload.get("abuse_path") or timeline_rows, max_items=6)
+    payload["shadow_note"] = "Generated from evidence with stable prompts and cache."
+
+    if payload.get("why_it_matters"):
+        row = RiskBrief(
+            assessment_id=int(assessment_id),
+            risk_kind="scenario_llm_sections",
+            risk_id=int(risk_id),
+            input_hash=input_hash,
+            model=("LOCAL" if is_local else str(model or "LOCAL"))[:64],
+            brief=json.dumps(payload, ensure_ascii=True),
+        )
+        try:
+            db.add(row)
+            db.commit()
+        except Exception:
+            logger.exception(
+                "Failed to persist LLM risk sections for assessment=%s risk=%s",
+                int(assessment_id),
+                int(risk_id),
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    return payload

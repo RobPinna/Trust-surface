@@ -51,7 +51,7 @@
         </span>
       </div>
       <p class="mt-3 text-lg sm:text-xl font-semibold text-white max-w-3xl">
-        {{ (vm.risk.risk_vector_summary or ('Top risk: ' ~ (vm.risk.primary_risk_type or vm.risk.title) ~ ' enabled by limited public signals.')) | replace('Top risk:', 'Risk:') }}
+        {{ (vm.risk.headline or vm.risk.risk_vector_summary or ('Top risk: ' ~ (vm.risk.primary_risk_type or vm.risk.title) ~ ' enabled by limited public signals.')) | replace('Top risk:', 'Risk:') }}
       </p>
       {% set reasoning = vm.risk.reasoning %}
       {% set reasoning_compact = false %}
@@ -156,26 +156,30 @@
       <h3 class="section-title">Business impact</h3>
       <article class="info-card compact mt-4">
         <p class="item-description">{{ vm.details.business_impact }}</p>
-      </article>
-    </section>
-
-    <section class="panel p-6">
-      <h3 class="section-title">What would confirm</h3>
-      <article class="info-card compact mt-4">
-        <ul class="space-y-2">
-          {% for x in vm.details.confirm_points %}
-          <li class="flex gap-2 item-description"><span class="text-emerald-300">-</span><span>{{ x }}</span></li>
+        <div class="kpi-mini mt-3">
+          <p class="kpi-label">Impacted roles</p>
+          {% if vm.details.impacted_roles %}
+          <div class="mt-2 flex flex-wrap gap-2">
+            {% for role in vm.details.impacted_roles %}
+            <span class="badge">{{ role }}</span>
+            {% endfor %}
+          </div>
           {% else %}
-          <li class="item-meta">No confirm criteria available.</li>
-          {% endfor %}
-        </ul>
-      </article>
-    </section>
+          <p class="item-meta mt-2">No impacted roles identified yet.</p>
+          {% endif %}
+        </div>
+        <div class="kpi-mini mt-3">
+          <p class="kpi-label">What would confirm</p>
+          <ul class="mt-2 space-y-2">
+            {% for x in vm.details.confirm_points %}
+            <li class="flex gap-2 item-description"><span class="text-emerald-300">-</span><span>{{ x }}</span></li>
+            {% else %}
+            <li class="item-meta">No confirm criteria available.</li>
+            {% endfor %}
+          </ul>
+        </div>
 
-    <section class="panel p-6">
-      <h3 class="section-title">Recommended actions</h3>
-      <div class="mt-4 space-y-3">
-        <article class="info-card compact">
+        <div class="kpi-mini mt-3">
           <p class="kpi-label">What would deny</p>
           <ul class="mt-2 space-y-2">
             {% for x in vm.details.deny_points %}
@@ -184,9 +188,9 @@
             <li class="item-meta">No deny criteria available.</li>
             {% endfor %}
           </ul>
-        </article>
+        </div>
 
-        <article class="info-card compact">
+        <div class="kpi-mini mt-3">
           <p class="kpi-label">Control points</p>
           <div class="mt-3 space-y-2">
             {% for cp in vm.details.control_points %}
@@ -197,6 +201,9 @@
                 </div>
                 <div class="min-w-0">
                   <p class="item-title">{{ cp.title }}</p>
+                  {% if cp.is_contradiction %}
+                  <p class="item-meta mt-1 text-amber-300">Contradiction to mitigate</p>
+                  {% endif %}
                   <p class="item-meta mt-1">Effort: {{ cp.effort }} | Expected reduction: {{ cp.expected_reduction }}</p>
                 </div>
               </div>
@@ -205,8 +212,8 @@
             <div class="empty-state">No control points available yet.</div>
             {% endfor %}
           </div>
-        </article>
-      </div>
+        </div>
+      </article>
     </section>
 
     <section class="panel p-6">

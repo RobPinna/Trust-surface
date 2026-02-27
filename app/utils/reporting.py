@@ -512,16 +512,17 @@ def render_risk_pdf(
         story.append(Paragraph(business_impact, body_style))
     else:
         story.append(Paragraph("Business impact narrative not available.", body_style))
-    story.append(Spacer(1, 8))
-
-    story.append(Paragraph("What would confirm", h2_style))
-    for x in list(details.get("confirm_points") or []):
+    impacted_roles = [str(x).strip() for x in list(details.get("impacted_roles") or []) if str(x).strip()]
+    if impacted_roles:
+        story.append(Paragraph(f"<b>Impacted roles:</b> {', '.join(_pdf_text(x) for x in impacted_roles[:8])}", body_style))
+    story.append(Paragraph("What would confirm", h3_style))
+    confirm_points = list(details.get("confirm_points") or [])
+    for x in confirm_points:
         story.append(Paragraph(f"- {_pdf_text(x)}", body_style))
-    if not list(details.get("confirm_points") or []):
+    if not confirm_points:
         story.append(Paragraph("No confirm criteria available.", body_style))
     story.append(Spacer(1, 8))
 
-    story.append(Paragraph("Recommended actions", h2_style))
     story.append(Paragraph("What would deny", h3_style))
     deny_points = list(details.get("deny_points") or [])
     if deny_points:

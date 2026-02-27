@@ -70,24 +70,74 @@ def list_risks(
     status_counts = dict(ranked.get("status_counts") or {})
     risk_types = list(ranked.get("risk_types") or [])
     rows = list(ranked.get("items") or [])
+    ranked_snapshot = dict(ranked.get("ranked") or {})
 
     cards = []
     for r in rows:
+        rid = int(r.get("id") or 0)
+        detail_vm = {}
+        if rid > 0:
+            try:
+                detail_vm = build_risk_detail_viewmodel(
+                    db,
+                    assessment,
+                    rid,
+                    allow_generated_text=True,
+                    ranked_snapshot=ranked_snapshot,
+                )
+            except Exception:
+                detail_vm = {}
+        detail_risk = detail_vm.get("risk") if isinstance(detail_vm, dict) else {}
+        detail_reasoning = (
+            detail_risk.get("reasoning")
+            if isinstance(detail_risk, dict) and isinstance(detail_risk.get("reasoning"), dict)
+            else {}
+        )
+
         cards.append(
             {
-                "id": int(r.get("id") or 0),
-                "risk_type": str(r.get("risk_type", "other")),
-                "primary_risk_type": str(r.get("primary_risk_type", "") or "").strip(),
-                "risk_vector_summary": str(r.get("risk_vector_summary", "") or "").strip(),
-                "title": str(r.get("title", "") or "Risk"),
-                "why": str(r.get("why_matters", "") or "Open for evidence and defensive controls.")[:180],
-                "impact_band": str(r.get("impact_band", "MED")),
-                "likelihood": str(r.get("likelihood", "med")),
-                "evidence_strength": str(r.get("evidence_strength", "WEAK")),
-                "evidence_strength_score": int(r.get("confidence", 0) or 0),
-                "signal_coverage": int(r.get("signal_coverage", 0) or 0),
+                "id": rid,
+                "risk_type": str(detail_risk.get("risk_type", r.get("risk_type", "other"))) if isinstance(detail_risk, dict) else str(r.get("risk_type", "other")),
+                "primary_risk_type": (
+                    str(detail_risk.get("primary_risk_type", r.get("primary_risk_type", "")) or "").strip()
+                    if isinstance(detail_risk, dict)
+                    else str(r.get("primary_risk_type", "") or "").strip()
+                ),
+                "risk_vector_summary": (
+                    str(detail_risk.get("risk_vector_summary", r.get("risk_vector_summary", "")) or "").strip()
+                    if isinstance(detail_risk, dict)
+                    else str(r.get("risk_vector_summary", "") or "").strip()
+                ),
+                "title": (
+                    str((detail_risk.get("headline") or detail_risk.get("title") or r.get("title") or "Risk")).strip()
+                    if isinstance(detail_risk, dict)
+                    else str(r.get("title", "") or "Risk")
+                ),
+                "why": (
+                    " ".join(
+                        str(
+                            detail_reasoning.get("why_it_matters")
+                            or detail_reasoning.get("why")
+                            or r.get("why_matters", "")
+                            or "Open for evidence and defensive controls."
+                        ).split()
+                    ).strip()
+                    if isinstance(detail_reasoning, dict)
+                    else str(r.get("why_matters", "") or "Open for evidence and defensive controls.")
+                ),
+                "impact_band": str(detail_risk.get("impact_band", r.get("impact_band", "MED"))) if isinstance(detail_risk, dict) else str(r.get("impact_band", "MED")),
+                "likelihood": str(detail_risk.get("likelihood", r.get("likelihood", "med"))) if isinstance(detail_risk, dict) else str(r.get("likelihood", "med")),
+                "evidence_strength": str(detail_risk.get("evidence_strength", r.get("evidence_strength", "WEAK"))) if isinstance(detail_risk, dict) else str(r.get("evidence_strength", "WEAK")),
+                "evidence_strength_score": int(
+                    (detail_risk.get("evidence_strength_score", r.get("confidence", 0)) if isinstance(detail_risk, dict) else r.get("confidence", 0))
+                    or 0
+                ),
+                "signal_coverage": int(
+                    (detail_risk.get("signal_coverage", r.get("signal_coverage", 0)) if isinstance(detail_risk, dict) else r.get("signal_coverage", 0))
+                    or 0
+                ),
                 "evidence_count": int(r.get("evidence_refs_count", 0) or 0),
-                "status": str(r.get("status", "WATCHLIST")),
+                "status": str(detail_risk.get("status", r.get("status", "WATCHLIST"))) if isinstance(detail_risk, dict) else str(r.get("status", "WATCHLIST")),
                 "missing_gate_reasons": list(r.get("missing_gate_reasons") or []),
                 "needs_review": bool(r.get("needs_review", False)),
                 "plausibility_score": int(r.get("plausibility_score", 0) or 0),
@@ -97,8 +147,14 @@ def list_risks(
                     if int(r.get("plausibility_score", 0) or 0) < 55
                     else "Needs validation"
                 ),
-                "reasoning": dict(r.get("reasoning") or {}),
-                "url": str(r.get("scenario_url", f"/assessments/{assessment_id}/risks/{int(r.get('id') or 0)}")),
+                "reasoning": (
+                    dict(detail_reasoning)
+                    if isinstance(detail_reasoning, dict) and detail_reasoning
+                    else dict(r.get("reasoning") or {})
+                ),
+                "url": str(
+                    detail_risk.get("scenario_url", r.get("scenario_url", f"/assessments/{assessment_id}/risks/{rid}"))
+                ) if isinstance(detail_risk, dict) else str(r.get("scenario_url", f"/assessments/{assessment_id}/risks/{rid}")),
             }
         )
 
