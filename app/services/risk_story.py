@@ -271,6 +271,83 @@ def _single_risk_headline(
     return "Risk"
 
 
+def _join_headline_terms(items: list[str]) -> str:
+    rows = [" ".join(str(x or "").split()).strip().lower() for x in items if " ".join(str(x or "").split()).strip()]
+    if not rows:
+        return ""
+    if len(rows) == 1:
+        return rows[0]
+    if len(rows) == 2:
+        return f"{rows[0]} and {rows[1]}"
+    return f"{rows[0]}, {rows[1]}, and {rows[2]}"
+
+
+def _headline_risk_label(*, base: str, corpus: str) -> str:
+    low = str(corpus or "").lower()
+    if "social engineering" in low:
+        return "Social engineering risk"
+    if "impersonation" in low:
+        return "Impersonation risk"
+    if any(k in low for k in ("payment fraud", "invoice", "iban", "wire transfer")):
+        return "Payment fraud risk"
+    if any(k in low for k in ("account takeover", "credential", "password reset")):
+        return "Account takeover risk"
+    return " ".join(str(base or "").split()).strip() or "Risk"
+
+
+def _headline_driver_from_rationale(text: str) -> str:
+    raw = " ".join(str(text or "").split()).strip()
+    if not raw:
+        return ""
+    low = raw.lower()
+
+    concept_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("team roles", ("team role", "staff role", "role cue", "org role", "public role")),
+        ("support channels", ("support channel", "helpdesk", "support contact", "customer care channel")),
+        ("partnerships", ("partnership", "partner", "third-party relationship")),
+        ("public contact channels", ("public contact", "contact channel", "official channel", "entrypoint", "dm channel")),
+        ("approval workflows", ("approval workflow", "approval path", "approval step", "sign-off")),
+        ("payment workflows", ("payment workflow", "invoice workflow", "billing workflow", "bank detail change")),
+        ("account recovery paths", ("account recovery", "password reset", "credential recovery")),
+    )
+    found: list[str] = []
+    seen: set[str] = set()
+    for label, hints in concept_rules:
+        if any(h in low for h in hints):
+            key = label.lower()
+            if key not in seen:
+                seen.add(key)
+                found.append(label)
+    if found:
+        return f"public information on {_join_headline_terms(found[:3])}"
+
+    sentence = _first_sentence(raw, max_chars=220)
+    sentence = re.sub(r"^\s*(the\s+)?evidence\s+(shows|indicates|suggests|reveals)\s+", "", sentence, flags=re.IGNORECASE)
+    sentence = re.sub(
+        r"^\s*(detailed|multiple|official|publicly available|public)\s+",
+        "",
+        sentence,
+        flags=re.IGNORECASE,
+    )
+    sentence = re.sub(
+        r",?\s*all of which\s+can be leveraged\s+for\s+.+$",
+        "",
+        sentence,
+        flags=re.IGNORECASE,
+    )
+    sentence = re.sub(r"\s+can be leveraged\s+for\s+.+$", "", sentence, flags=re.IGNORECASE)
+    sentence = re.sub(r"\s+leveraged\s+for\s+.+$", "", sentence, flags=re.IGNORECASE)
+    sentence = sentence.rstrip(" .,:;-")
+    sentence = re.sub(r"\bpublicly available information (of|about)\b", "public information on", sentence, flags=re.IGNORECASE)
+    sentence = re.sub(r"\bpublicly available information\b", "public information", sentence, flags=re.IGNORECASE)
+    sentence = " ".join(sentence.split()).strip()
+    if not sentence:
+        return ""
+    if not sentence.lower().startswith("public"):
+        sentence = f"public information on {sentence}"
+    return sentence
+
+
 def _contextual_risk_headline(
     *,
     primary_risk_type: str,
@@ -279,7 +356,8 @@ def _contextual_risk_headline(
     why_it_matters: str,
     how_text: str,
     business_impact: str,
-    max_chars: int = 96,
+    rationale: str = "",
+    max_chars: int = 140,
 ) -> str:
     base = _single_risk_headline(
         primary_risk_type=primary_risk_type,
@@ -292,9 +370,12 @@ def _contextual_risk_headline(
     if not base:
         base = "Risk"
 
+    rationale_text = " ".join(str(rationale or "").split()).strip()
+
     corpus = " ".join(
         str(x or "")
         for x in (
+            rationale_text,
             risk_vector_summary,
             why_it_matters,
             how_text,
@@ -331,6 +412,16 @@ def _contextual_risk_headline(
             break
 
     candidates: list[str] = []
+    if rationale_text:
+        risk_label = _headline_risk_label(base=base, corpus=corpus)
+        rationale_driver = _headline_driver_from_rationale(rationale_text)
+        if rationale_driver:
+            candidates.extend(
+                [
+                    f"{risk_label} leveraged by {rationale_driver}",
+                    f"{risk_label} enabled by {rationale_driver}",
+                ]
+            )
     if workflow and impact:
         candidates.extend(
             [
@@ -2205,16 +2296,27 @@ def _likelihood_from_plausibility(
     plausibility: int, *, signal_coverage: int, distinct_urls: int, evidence_refs_count: int
 ) -> str:
     p = int(max(0, min(100, plausibility)))
-    if p >= 75:
+    # Conservative calibration:
+    # - HIGH requires stronger evidence convergence (plausibility + breadth)
+    # - sparse exposure defaults to MED/LOW to avoid optimistic likelihood inflation
+    if p >= 85:
         out = "high"
-    elif p >= 55:
+    elif p >= 60:
         out = "med"
     else:
         out = "low"
-    if int(signal_coverage or 0) < 2 or int(distinct_urls or 0) < 2:
-        if out == "high":
-            out = "med"
-    if int(signal_coverage or 0) == 0 or int(evidence_refs_count or 0) == 0:
+
+    cov = int(signal_coverage or 0)
+    src = int(distinct_urls or 0)
+    refs = int(evidence_refs_count or 0)
+
+    if out == "high" and (cov < 3 or src < 3 or refs < 3):
+        out = "med"
+    if out in {"high", "med"} and (cov < 2 or src < 2 or refs < 2):
+        out = "low"
+    if cov <= 1 and refs <= 2:
+        out = "low"
+    if cov == 0 or refs == 0:
         out = "low"
     return out
 
@@ -3072,6 +3174,7 @@ def get_ranked_risks(
             why_it_matters=str(getattr(h, "impact_rationale", "") or ""),
             how_text=str(getattr(h, "description", "") or ""),
             business_impact=str(getattr(h, "impact_rationale", "") or ""),
+            rationale=str(getattr(h, "impact_rationale", "") or ""),
         )
 
         timeline = from_json(h.timeline_json or "[]", [])
@@ -4481,6 +4584,7 @@ def build_risk_detail_viewmodel(
         why_it_matters=str(getattr(row, "impact_rationale", "") or ""),
         how_text=str(getattr(row, "description", "") or ""),
         business_impact=str(getattr(row, "impact_rationale", "") or ""),
+        rationale=row_impact_rationale,
     )
     if not primary_risk_type:
         primary_risk_type = _risk_display_name(primary_risk_type="", fallback_outcome=outcome)
@@ -4830,6 +4934,13 @@ def build_risk_detail_viewmodel(
         if rationale_text:
             how_bits.append(rationale_text)
         how_for_title = " ".join(how_bits).strip()
+    rationale_for_title = ""
+    if how_struct and list(how_struct.get("items") or []):
+        rationale_for_title = " ".join(str(how_struct.get("rationale", "")).split()).strip()
+    if not rationale_for_title:
+        rationale_for_title = " ".join(str(llm_hypothesis.get("rationale", "")).split()).strip()
+    if not rationale_for_title:
+        rationale_for_title = row_impact_rationale
     contextual_headline = _contextual_risk_headline(
         primary_risk_type=primary_risk_type,
         fallback_outcome=outcome,
@@ -4837,6 +4948,7 @@ def build_risk_detail_viewmodel(
         why_it_matters=str(risk_reasoning.get("why_it_matters", "") or ""),
         how_text=how_for_title,
         business_impact=business_impact_text,
+        rationale=rationale_for_title,
     )
     if contextual_headline:
         risk_headline = contextual_headline

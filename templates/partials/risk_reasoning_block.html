@@ -33,13 +33,18 @@
 {% endif %}
 {% set _why_matters = (reasoning.why_it_matters or '') | replace('Impact is a conservative estimate based on exposed channels and workflow sensitivity cues.', '') | replace('Impact is a conservative estimate of business impact if the risk materializes.', '') | trim %}
 {% set _why_ns = namespace(text=_why_matters) %}
+{% set _how_text = (reasoning.how or '') | trim %}
+{% set _how_struct = reasoning.how_struct if reasoning.how_struct is defined and reasoning.how_struct else {} %}
+{% set _rationale_only = reasoning_rationale_only if reasoning_rationale_only is defined else false %}
+{% set _hide_how = reasoning_hide_how if reasoning_hide_how is defined else false %}
+{% if _rationale_only and _how_struct and _how_struct.get('rationale') %}
+  {% set _why_ns.text = (_how_struct.get('rationale') or '') | trim %}
+{% endif %}
 {% for _tail in ['Context:', 'Context :', 'Context -', 'Context'] %}
   {% if _why_ns.text.endswith(_tail) %}
     {% set _why_ns.text = (_why_ns.text[:-(_tail | length)] | trim) %}
   {% endif %}
 {% endfor %}
-{% set _how_text = (reasoning.how or '') | trim %}
-{% set _how_struct = reasoning.how_struct if reasoning.how_struct is defined and reasoning.how_struct else {} %}
 {% set _signal_links = reasoning.signal_links if reasoning.signal_links is defined and reasoning.signal_links else [] %}
 {% set _full_text = reasoning_full_text if reasoning_full_text is defined else false %}
 <div class="mt-3 grid grid-cols-1 {% if not _compact %}sm:grid-cols-2{% endif %} gap-2">
@@ -98,7 +103,7 @@
   <article class="info-card compact">
     <p class="kpi-label">Why it matters</p>
     <p class="item-description mt-1 {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300 whitespace-normal break-words {% if _full_text %}line-clamp-none max-h-none overflow-visible{% endif %}">{{ _why_ns.text }}</p>
-    {% if _how_struct and _how_struct.get('items') %}
+    {% if (not _hide_how) and _how_struct and _how_struct.get('items') %}
     <div class="mt-3">
       <p class="kpi-label">How</p>
       <ol class="mt-2 space-y-2">
@@ -116,7 +121,7 @@
       <p class="item-meta mt-4"><span class="text-slate-300">Uncertainty:</span> {{ _how_struct.get('uncertainty') }}</p>
       {% endif %}
     </div>
-    {% elif _how_text %}
+    {% elif (not _hide_how) and _how_text %}
     <div class="mt-3">
       <p class="kpi-label">How</p>
       <p class="item-description mt-1 {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300 whitespace-normal break-words {% if _full_text %}line-clamp-none max-h-none overflow-visible{% endif %}" data-how-code-highlight="1">{{ _how_text }}</p>

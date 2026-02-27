@@ -53,16 +53,11 @@
         <article class="panel p-5">
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
-              <h3 class="text-base sm:text-lg font-semibold text-white clamp-2">{{ c.title }}</h3>
-              {% if status_tab == 'WATCHLIST' %}
-              <p class="text-sm text-slate-300 clamp-2 mt-2">{{ c.watchlist_label }}</p>
-              {% else %}
-              <p class="text-sm text-slate-300 clamp-2 mt-2">
-                {{ (c.risk_vector_summary or c.why) | replace('Top risk:', 'Risk:') }}
-              </p>
-              {% endif %}
+              <h3 class="text-base sm:text-lg font-semibold text-white">{{ c.title }}</h3>
               {% set reasoning = c.reasoning %}
               {% set reasoning_compact = true %}
+              {% set reasoning_rationale_only = true %}
+              {% set reasoning_hide_how = true %}
               {% include "partials/risk_reasoning_block.html" %}
             </div>
             <a class="btn-primary text-xs" href="{{ c.url }}">Open</a>

@@ -9,6 +9,8 @@
 </div>
 {% endblock %}
 
+{% block workspace_header_class %}risk-detail-header{% endblock %}
+
 {% block topbar_left %}{% endblock %}
 {% block topbar_right %}{% endblock %}
 
@@ -44,15 +46,12 @@
   {% set r = vm.risk %}
   {% set impact_class = 'high' if r.impact_band == 'HIGH' else ('med' if r.impact_band == 'MED' else 'low') %}
   <div class="space-y-5">
-    <section class="panel p-6">
-      <div class="mt-3 flex flex-wrap gap-2 items-center">
+    <section>
+      <div class="flex flex-wrap gap-2 items-center">
         <span class="badge badge-primary-risk" data-tooltip="Primary risk type (deterministically assigned from validated signals).">
           Primary risk type: {{ vm.risk.primary_risk_type if vm.risk.primary_risk_type else vm.risk.title }}
         </span>
       </div>
-      <p class="mt-3 text-lg sm:text-xl font-semibold text-white max-w-3xl">
-        {{ (vm.risk.headline or vm.risk.risk_vector_summary or ('Top risk: ' ~ (vm.risk.primary_risk_type or vm.risk.title) ~ ' enabled by limited public signals.')) | replace('Top risk:', 'Risk:') }}
-      </p>
       {% set reasoning = vm.risk.reasoning %}
       {% set reasoning_compact = false %}
       {% set reasoning_full_text = true %}
@@ -72,7 +71,7 @@
         </span>
         <span class="badge-confidence metric-label" data-tooltip="{{ r.evidence_strength_tooltip }}">
           <span class="metric-key">Evidence strength:</span>
-          <span class="metric-value {{ 'high' if r.evidence_strength in ['STRONG'] else ('med' if r.evidence_strength in ['OK'] else 'low') }}">{{ r.evidence_strength }}</span>
+          <span class="metric-value {{ 'high' if r.evidence_strength in ['STRONG'] else ('med' if r.evidence_strength in ['OK'] else 'low') }}">{{ r.evidence_strength }} ({{ r.evidence_strength_score }}%)</span>
         </span>
         <span class="badge" data-tooltip="Signal coverage: number and diversity of distinct signals supporting this risk.">
           Signal coverage: {{ r.signal_coverage }}
@@ -154,9 +153,12 @@
 
     <section class="panel p-6">
       <h3 class="section-title">Business impact</h3>
-      <article class="info-card compact mt-4">
-        <p class="item-description">{{ vm.details.business_impact }}</p>
-        <div class="kpi-mini mt-3">
+      <div class="mt-4 space-y-3">
+        <article class="info-card compact">
+          <p class="item-description">{{ vm.details.business_impact }}</p>
+        </article>
+
+        <article class="info-card compact">
           <p class="kpi-label">Impacted roles</p>
           {% if vm.details.impacted_roles %}
           <div class="mt-2 flex flex-wrap gap-2">
@@ -167,8 +169,9 @@
           {% else %}
           <p class="item-meta mt-2">No impacted roles identified yet.</p>
           {% endif %}
-        </div>
-        <div class="kpi-mini mt-3">
+        </article>
+
+        <article class="info-card compact">
           <p class="kpi-label">What would confirm</p>
           <ul class="mt-2 space-y-2">
             {% for x in vm.details.confirm_points %}
@@ -177,9 +180,9 @@
             <li class="item-meta">No confirm criteria available.</li>
             {% endfor %}
           </ul>
-        </div>
+        </article>
 
-        <div class="kpi-mini mt-3">
+        <article class="info-card compact">
           <p class="kpi-label">What would deny</p>
           <ul class="mt-2 space-y-2">
             {% for x in vm.details.deny_points %}
@@ -188,9 +191,9 @@
             <li class="item-meta">No deny criteria available.</li>
             {% endfor %}
           </ul>
-        </div>
+        </article>
 
-        <div class="kpi-mini mt-3">
+        <article class="info-card compact">
           <p class="kpi-label">Control points</p>
           <div class="mt-3 space-y-2">
             {% for cp in vm.details.control_points %}
@@ -212,8 +215,8 @@
             <div class="empty-state">No control points available yet.</div>
             {% endfor %}
           </div>
-        </div>
-      </article>
+        </article>
+      </div>
     </section>
 
     <section class="panel p-6">

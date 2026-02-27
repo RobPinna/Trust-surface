@@ -117,8 +117,8 @@
               {% endif %}
             </div>
           </header>
-          <div class="workspace-header">
-            <div>
+          <div class="workspace-header {% block workspace_header_class %}{% endblock %}">
+            <div class="workspace-header-title-wrap">
               {% if not hide_section_title %}
               <h2 class="workspace-page-title">{{ section_title if section_title else (title if title else 'Trust Surface') }}</h2>
               {% endif %}
