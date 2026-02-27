@@ -1,7 +1,9 @@
 from app.connectors.base import ConnectorBase
+from app.connectors.brand_impersonation_monitor import BrandImpersonationMonitorConnector
 from app.connectors.dns_footprint import DNSFootprintConnector
 from app.connectors.email_posture_analyzer import EmailPostureAnalyzerConnector
 from app.connectors.gdelt_news import GDELTNewsConnector
+from app.connectors.hibp_breach_domain import HIBPBreachDomainConnector
 from app.connectors.job_postings_live import JobPostingsLiveConnector
 from app.connectors.media_trend import MediaTrendConnector
 from app.connectors.official_channel_enumerator import OfficialChannelEnumeratorConnector
@@ -24,6 +26,7 @@ def connector_registry() -> list[ConnectorBase]:
         EmailPostureAnalyzerConnector(),
         DNSFootprintConnector(),
         SubdomainDiscoveryConnector(),
+        BrandImpersonationMonitorConnector(),
         GDELTNewsConnector(),
         MediaTrendConnector(),
         SocialMockConnector(),
@@ -33,6 +36,7 @@ def connector_registry() -> list[ConnectorBase]:
         PublicDocsPdfConnector(),
         VirusTotalConnector(),
         ShodanConnector(),
+        HIBPBreachDomainConnector(),
     ]
 
 

@@ -53,6 +53,11 @@ Create `.env` from `.env.example` if you need persistent settings.
 For the recommended main mode, set `OPENAI_API_KEY`.
 Use local/offline mode only for testing.
 
+Optional OSINT connectors for social-engineering/trust-leverage enrichment are available in the in-app `Settings` page:
+- `brand_impersonation_monitor` (typosquat + RDAP + certificate transparency)
+- `hibp_breach_domain` (Have I Been Pwned domain breach search, API key required)
+- `shodan` (attack-surface DNS/host exposure enrichment, API key required)
+
 Key placeholders available in `.env.example`:
 
 ```env

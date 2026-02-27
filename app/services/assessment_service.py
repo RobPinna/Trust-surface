@@ -49,6 +49,7 @@ DEFAULT_SOURCES = [
     "email_posture_analyzer",
     "dns_footprint",
     "subdomain_discovery",
+    "brand_impersonation_monitor",
     "gdelt_news",
     "media_trend",
     "social_mock",
@@ -56,6 +57,8 @@ DEFAULT_SOURCES = [
     "vendor_js_detection",
     "procurement_documents",
     "public_docs_pdf",
+    "shodan",
+    "hibp_breach_domain",
 ]
 LLM_MODEL_OPTIONS = {"gpt-4.1", "gpt-4.1o", "LOCAL"}
 LLM_API_SETTING_NAME = "__llm_reasoner_api__"
