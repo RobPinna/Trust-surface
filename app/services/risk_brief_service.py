@@ -79,7 +79,7 @@ IMPACT_KEYWORDS = (
 )
 RISK_BRIEF_SAFETY_FILTER_ENABLED = os.getenv("RISK_BRIEF_SAFETY_FILTER", "0").strip() == "1"
 LLM_HYPOTHESIS_PROMPT_VERSION = "2026-02-27-hypothesis-v2"
-LLM_SECTIONS_PROMPT_VERSION = "2026-02-27-sections-v1"
+LLM_SECTIONS_PROMPT_VERSION = "2026-02-28-sections-v3-conservative"
 
 
 @dataclass(frozen=True)
@@ -1265,6 +1265,9 @@ def _call_llm_risk_hypothesis(
         "Rules:\n"
         "- Use only supplied evidence; do not invent entities/channels.\n"
         "- Keep each hypothesis <= 170 characters.\n"
+        "- Frame results as plausible scenarios, never as confirmed incidents.\n"
+        "- Avoid certainty words like 'will' or 'is happening'; prefer 'could', 'may', 'plausibly'.\n"
+        "- Keep risk wording broad when evidence is mostly public role/contact/channel signals.\n"
         "- Defensive language only; no actionable abuse guidance.\n\n"
         "JSON context:\n"
         + json.dumps(ctx, ensure_ascii=True)
@@ -1568,6 +1571,187 @@ def _safe_abuse_path_steps(raw: Any, *, max_items: int = 6) -> list[dict[str, st
     return out
 
 
+def _safe_abuse_path_graph(
+    raw: Any,
+    *,
+    fallback_steps: list[dict[str, str]] | None = None,
+    max_nodes: int = 10,
+    max_links: int = 18,
+) -> dict[str, Any]:
+    def _from_steps(steps: list[dict[str, str]]) -> dict[str, Any]:
+        safe_steps = _safe_abuse_path_steps(steps, max_items=6)
+        nodes: list[dict[str, Any]] = []
+        links: list[dict[str, Any]] = []
+        for idx, step in enumerate(safe_steps, start=1):
+            nid = f"s{idx}"
+            nodes.append(
+                {
+                    "id": nid,
+                    "stage": int(idx - 1),
+                    "title": _safe_section_line(str(step.get("title", "")), max_chars=96) or f"Step {idx}",
+                    "detail": _safe_section_line(str(step.get("detail", "")), max_chars=220),
+                    "type": "step",
+                }
+            )
+            if idx > 1:
+                links.append({"source": f"s{idx-1}", "target": nid, "label": "", "weight": 3})
+        return {"nodes": nodes[:max_nodes], "links": links[:max_links]}
+
+    if not isinstance(raw, dict):
+        return _from_steps(list(fallback_steps or []))
+
+    raw_nodes = raw.get("nodes")
+    raw_links = raw.get("links")
+    if not isinstance(raw_nodes, list):
+        raw_nodes = []
+    if not isinstance(raw_links, list):
+        raw_links = []
+
+    nodes: list[dict[str, Any]] = []
+    node_id_set: set[str] = set()
+    for idx, item in enumerate(raw_nodes, start=1):
+        if not isinstance(item, dict):
+            continue
+        node_id = re.sub(r"[^a-zA-Z0-9_\-]", "", str(item.get("id", f"n{idx}"))).strip().lower() or f"n{idx}"
+        if node_id in node_id_set:
+            continue
+        title = _safe_section_line(str(item.get("title", "")), max_chars=96)
+        detail = _safe_section_line(str(item.get("detail", "")), max_chars=220)
+        if not title and not detail:
+            continue
+        if not title:
+            title = f"Step {len(nodes) + 1}"
+        if "stage" in item:
+            stage_raw = item.get("stage")
+            try:
+                stage = int(stage_raw)
+            except Exception:
+                stage = len(nodes)
+        else:
+            try:
+                stage = int(item.get("step", len(nodes) + 1)) - 1
+            except Exception:
+                stage = len(nodes)
+        stage = max(0, min(6, int(stage)))
+        node_type = " ".join(str(item.get("type", "step")).split()).strip().lower() or "step"
+        if node_type not in {"entry", "action", "decision", "outcome", "step"}:
+            node_type = "step"
+        nodes.append({"id": node_id, "stage": stage, "title": title, "detail": detail, "type": node_type})
+        node_id_set.add(node_id)
+        if len(nodes) >= max_nodes:
+            break
+
+    if not nodes:
+        return _from_steps(list(fallback_steps or []))
+
+    links: list[dict[str, Any]] = []
+    seen_links: set[str] = set()
+    for item in raw_links:
+        if not isinstance(item, dict):
+            continue
+        src = re.sub(r"[^a-zA-Z0-9_\-]", "", str(item.get("source", ""))).strip().lower()
+        dst = re.sub(r"[^a-zA-Z0-9_\-]", "", str(item.get("target", ""))).strip().lower()
+        if not src or not dst or src == dst:
+            continue
+        if src not in node_id_set or dst not in node_id_set:
+            continue
+        label = _safe_section_line(str(item.get("label", "")), max_chars=90)
+        try:
+            weight = int(item.get("weight", 2) or 2)
+        except Exception:
+            weight = 2
+        weight = max(1, min(5, weight))
+        key = f"{src}|{dst}|{label.lower()}"
+        if key in seen_links:
+            continue
+        seen_links.add(key)
+        links.append({"source": src, "target": dst, "label": label, "weight": weight})
+        if len(links) >= max_links:
+            break
+
+    if not links and len(nodes) > 1:
+        nodes_sorted = sorted(nodes, key=lambda x: (int(x.get("stage", 0) or 0), str(x.get("id", ""))))
+        for idx in range(1, len(nodes_sorted)):
+            src = str(nodes_sorted[idx - 1].get("id", ""))
+            dst = str(nodes_sorted[idx].get("id", ""))
+            if src and dst and src != dst:
+                links.append({"source": src, "target": dst, "label": "", "weight": 3})
+                if len(links) >= max_links:
+                    break
+
+    nodes.sort(key=lambda x: (int(x.get("stage", 0) or 0), str(x.get("id", ""))))
+    return {"nodes": nodes[:max_nodes], "links": links[:max_links]}
+
+
+def _local_abuse_path_graph(
+    *,
+    steps: list[dict[str, str]],
+    contradictions: list[str],
+    risk_type: str,
+    primary_risk_type: str,
+) -> dict[str, Any]:
+    base = _safe_abuse_path_graph({}, fallback_steps=steps, max_nodes=10, max_links=18)
+    nodes = list(base.get("nodes") or [])
+    links = list(base.get("links") or [])
+    if len(nodes) < 3:
+        return {"nodes": nodes, "links": links}
+
+    low = f"{str(risk_type or '')} {str(primary_risk_type or '')}".lower()
+    if "payment" in low or "invoice" in low or "billing" in low:
+        alt_title = "Alternate payment pretext"
+        alt_detail = "Actor pivots to a different billing/finance persona when initial checks block the first route."
+    elif "account" in low or "credential" in low or "login" in low:
+        alt_title = "Alternate account-access pretext"
+        alt_detail = "Actor pivots to account recovery urgency if the first social route is rejected."
+    else:
+        alt_title = "Alternate trusted-channel pretext"
+        alt_detail = "Actor switches to another official-looking channel or role to keep the interaction credible."
+
+    pivot = nodes[1]
+    target = nodes[min(len(nodes) - 1, 3)]
+    alt_id = "alt-branch-1"
+    if all(str(n.get("id", "")).lower() != alt_id for n in nodes):
+        stage = int(pivot.get("stage", 0) or 0) + 1
+        nodes.append(
+            {
+                "id": alt_id,
+                "stage": max(1, min(5, stage)),
+                "title": alt_title,
+                "detail": _safe_section_line(alt_detail, max_chars=220),
+                "type": "decision",
+            }
+        )
+        links.append({"source": str(pivot.get("id", "")), "target": alt_id, "label": "alternate route", "weight": 2})
+        links.append({"source": alt_id, "target": str(target.get("id", "")), "label": "rejoin path", "weight": 2})
+
+    if contradictions and nodes:
+        last_stage = max(int(n.get("stage", 0) or 0) for n in nodes)
+        guard_id = "outcome-blocked"
+        if all(str(n.get("id", "")).lower() != guard_id for n in nodes):
+            nodes.append(
+                {
+                    "id": guard_id,
+                    "stage": max(1, min(6, last_stage + 1)),
+                    "title": "Attempt blocked by controls",
+                    "detail": _safe_section_line(
+                        "Out-of-band verification or strict channel policy blocks the malicious progression.",
+                        max_chars=220,
+                    ),
+                    "type": "outcome",
+                }
+            )
+            links.append(
+                {
+                    "source": str(nodes[min(len(nodes) - 2, 2)].get("id", "")),
+                    "target": guard_id,
+                    "label": "defensive branch",
+                    "weight": 1,
+                }
+            )
+
+    return _safe_abuse_path_graph({"nodes": nodes, "links": links}, fallback_steps=steps, max_nodes=10, max_links=18)
+
+
 def _hash_llm_sections_input(
     *,
     assessment_id: int,
@@ -1628,6 +1812,12 @@ def _parse_llm_sections_blob(blob: str) -> dict[str, Any] | None:
         payload.get("abuse_path") or payload.get("abuse_path_steps") or [],
         max_items=6,
     )
+    abuse_path_graph = _safe_abuse_path_graph(
+        payload.get("abuse_path_graph") or payload.get("abuse_graph") or {},
+        fallback_steps=abuse_path,
+        max_nodes=10,
+        max_links=18,
+    )
     mode = " ".join(str(payload.get("mode", "LOCAL")).split()).strip().upper() or "LOCAL"
     if mode not in {"LLM", "LOCAL"}:
         mode = "LOCAL"
@@ -1642,6 +1832,7 @@ def _parse_llm_sections_blob(blob: str) -> dict[str, Any] | None:
         "control_points": control_points,
         "mitre_categories": mitre_categories,
         "abuse_path": abuse_path,
+        "abuse_path_graph": abuse_path_graph,
         "mode": mode,
         "shadow_note": "Generated from evidence with stable prompts and cache.",
     }
@@ -1758,6 +1949,12 @@ def _local_llm_sections_payload(
             ],
             max_items=6,
         )
+    abuse_path_graph = _local_abuse_path_graph(
+        steps=abuse_path,
+        contradictions=list(contradictions or []),
+        risk_type=str(risk_type or ""),
+        primary_risk_type=str(primary_risk_type or ""),
+    )
 
     return {
         "why_it_matters": why,
@@ -1768,6 +1965,7 @@ def _local_llm_sections_payload(
         "control_points": _safe_control_points(control_points, max_items=5),
         "mitre_categories": mitre_categories,
         "abuse_path": abuse_path,
+        "abuse_path_graph": abuse_path_graph,
         "mode": "LOCAL",
         "shadow_note": "Generated from evidence with stable prompts and cache.",
     }
@@ -1811,6 +2009,8 @@ def _call_llm_risk_sections(
         "- business_impact (1-2 concise sentences)\n"
         "- mitre_categories (array of ATT&CK codes like T1566, T1078, T1598, max 6)\n"
         "- abuse_path (array 4-6 objects: {step,title,detail})\n"
+        "- abuse_path_graph (object with nodes+links for sankey-style branching: "
+        "{nodes:[{id,stage,title,detail,type}], links:[{source,target,label,weight}]})\n"
         "- confirm_points (array 2-4)\n"
         "- deny_points (array 2-4)\n"
         "- control_points (array 3-5 objects: {title, effort[LOW|MED|HIGH], expected_reduction[LOW|MED|HIGH]})\n"
@@ -1818,8 +2018,13 @@ def _call_llm_risk_sections(
         "- Keep why_it_matters semantically consistent with input why_it_matters.\n"
         "- Keep language concrete and human.\n"
         "- Use only evidence in context.\n"
+        "- Use probabilistic language: could/may/likely; avoid deterministic claims.\n"
+        "- Treat output as a risk hypothesis, not proof of an active incident.\n"
+        "- If evidence is mainly contact/role/channel visibility, keep outcomes broad (e.g., unauthorized access/data exposure) and avoid overly specific claims.\n"
         "- If contradictions are present, include at least one control point to resolve them.\n"
         "- abuse_path must reflect a plausible sequence and remain defensive-only.\n"
+        "- abuse_path_graph must be consistent with abuse_path, but can include realistic branch/deviation paths when evidence supports them.\n"
+        "- Prefer 4-10 nodes and 4-14 links; include at least one decision/branch node when plausible.\n"
         "- No markdown, no bullets outside arrays.\n\n"
         "JSON context:\n"
         + json.dumps(ctx, ensure_ascii=True)
@@ -1966,6 +2171,12 @@ def get_or_generate_llm_risk_sections(
     payload["control_points"] = _safe_control_points(payload.get("control_points") or [], max_items=5)
     payload["mitre_categories"] = _safe_mitre_codes(payload.get("mitre_categories") or [], max_items=6)
     payload["abuse_path"] = _safe_abuse_path_steps(payload.get("abuse_path") or timeline_rows, max_items=6)
+    payload["abuse_path_graph"] = _safe_abuse_path_graph(
+        payload.get("abuse_path_graph") or payload.get("abuse_graph") or {},
+        fallback_steps=list(payload.get("abuse_path") or timeline_rows),
+        max_nodes=10,
+        max_links=18,
+    )
     payload["shadow_note"] = "Generated from evidence with stable prompts and cache."
 
     if payload.get("why_it_matters"):

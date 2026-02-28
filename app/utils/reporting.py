@@ -531,7 +531,7 @@ def render_risk_pdf(
     else:
         story.append(Paragraph("No deny criteria available.", body_style))
 
-    story.append(Paragraph("Control points", h3_style))
+    story.append(Paragraph("Recommended actions", h3_style))
     cps = list(details.get("control_points") or [])
     if cps:
         for cp in cps:
@@ -541,7 +541,7 @@ def render_risk_pdf(
             story.append(Paragraph(f"- <b>{title}</b>", body_style))
             story.append(Paragraph(f"&nbsp;&nbsp;Effort: {effort} | Expected reduction: {red}", body_style))
     else:
-        story.append(Paragraph("No control points available yet.", body_style))
+        story.append(Paragraph("No recommended actions available yet.", body_style))
     story.append(Spacer(1, 8))
 
     story.append(Paragraph("Top evidence", h2_style))

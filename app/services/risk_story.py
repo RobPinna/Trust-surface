@@ -35,7 +35,13 @@ from config.signal_display_map import map_bundle_display
 logger = logging.getLogger(__name__)
 
 
-LIKELIHOOD_SCORE = {"low": 1, "med": 2, "high": 3}
+LIKELIHOOD_SCORE: dict[str, float] = {
+    "low": 1.0,
+    "low-med": 1.5,
+    "med": 2.0,
+    "med-high": 2.5,
+    "high": 3.0,
+}
 IMPACT_SCORE = {"LOW": 1, "MED": 2, "HIGH": 3}
 EVIDENCE_STRENGTH_SCORE = {"WEAK": 1, "OK": 2, "STRONG": 3}
 RISK_STATUS_VALUES = ("ELEVATED", "WATCHLIST", "BASELINE")
@@ -227,13 +233,20 @@ def _risk_display_name(*, primary_risk_type: str, fallback_outcome: str) -> str:
         "social engineering": "Social manipulation risk",
         "payment fraud": "Payment fraud risk",
         "vendor trust abuse": "Third-party trust abuse risk",
-        "account takeover vector": "Account takeover risk",
+        "account takeover vector": "Potential unauthorized access exposure",
+        "account takeover risk": "Potential unauthorized access exposure",
+        "credential and account workflow exposure": "Potential unauthorized access exposure",
+        "unauthorized access risk": "Potential unauthorized access exposure",
         "supply chain dependency risk": "Supplier dependency risk",
         "booking fraud": "Booking fraud risk",
         "donation fraud": "Donation fraud risk",
         "partner impersonation": "Partner impersonation risk",
         "data handling abuse": "Data handling risk",
         "channel ambiguity exploitation": "Channel confusion risk",
+        "potential unauthorized access exposure": "Potential unauthorized access exposure",
+        "potential unauthorized data access exposure": "Potential unauthorized data access exposure",
+        "potential impersonation and trust abuse": "Potential impersonation and trust abuse",
+        "potential payment workflow abuse exposure": "Potential payment workflow abuse exposure",
     }
     if key in mapping:
         return mapping[key]
@@ -291,7 +304,7 @@ def _headline_risk_label(*, base: str, corpus: str) -> str:
     if any(k in low for k in ("payment fraud", "invoice", "iban", "wire transfer")):
         return "Payment fraud risk"
     if any(k in low for k in ("account takeover", "credential", "password reset")):
-        return "Account takeover risk"
+        return "Unauthorized access exposure risk"
     return " ".join(str(base or "").split()).strip() or "Risk"
 
 
@@ -1697,9 +1710,9 @@ def _severity_from_likelihood_impact(likelihood: str, impact_band: str) -> int:
     lik = (likelihood or "med").strip().lower()
     imp = (impact_band or "MED").strip().upper()
     matrix = {
-        "LOW": {"low": 1, "med": 2, "high": 3},
-        "MED": {"low": 2, "med": 3, "high": 4},
-        "HIGH": {"low": 3, "med": 4, "high": 5},
+        "LOW": {"low": 1, "low-med": 1, "med": 2, "med-high": 2, "high": 3},
+        "MED": {"low": 2, "low-med": 2, "med": 3, "med-high": 4, "high": 4},
+        "HIGH": {"low": 3, "low-med": 3, "med": 4, "med-high": 4, "high": 5},
     }
     return int(matrix.get(imp, matrix["MED"]).get(lik, 3))
 
@@ -1900,6 +1913,78 @@ def _risk_outcome_label(risk_type: str, *, sector: str = "", process_flags: dict
     return "External trust-channel risk"
 
 
+def _conservative_primary_risk_type(
+    *,
+    primary_risk_type: str,
+    risk_type: str,
+    fallback_outcome: str,
+    signal_coverage: int,
+    evidence_refs_count: int,
+    evidence_strength_score: int,
+    plausibility_score: int = 0,
+    potential_impact_score: int = 0,
+    signal_types: set[str] | None = None,
+) -> str:
+    raw = " ".join(str(primary_risk_type or "").split()).strip()
+    fallback = " ".join(str(fallback_outcome or "").split()).strip()
+    if not raw:
+        raw = fallback
+    low = raw.lower()
+    st = {str(x).strip().upper() for x in (signal_types or set()) if str(x).strip()}
+
+    sparse_evidence = (
+        int(signal_coverage or 0) <= 2
+        or int(evidence_refs_count or 0) <= 2
+        or int(evidence_strength_score or 0) < 70
+        or int(plausibility_score or 0) < 72
+    )
+    very_sparse = (
+        int(signal_coverage or 0) <= 1
+        or int(evidence_refs_count or 0) <= 1
+        or int(evidence_strength_score or 0) < 60
+    )
+    baseline_like = bool(st) and st.issubset({"CONTACT_CHANNEL", "EXTERNAL_ATTENTION", "ORG_CUE"})
+    if very_sparse or baseline_like:
+        sparse_evidence = True
+
+    if int(potential_impact_score or 0) < 55 and int(signal_coverage or 0) <= 2:
+        sparse_evidence = True
+
+    if sparse_evidence:
+        if any(k in low for k in ("account takeover", "credential", "password reset", "login", "identity")):
+            return "Potential unauthorized access exposure"
+        if any(k in low for k in ("payment fraud", "invoice", "iban", "wire transfer", "billing")):
+            return "Potential payment workflow abuse exposure"
+        if any(k in low for k in ("impersonation", "social engineering", "pretext", "partner impersonation")):
+            return "Potential impersonation and trust abuse"
+        if any(k in low for k in ("privacy", "data", "dpo", "gdpr")):
+            return "Potential unauthorized data access exposure"
+        if low in {"channel ambiguity exploitation", "external trust-channel risk"}:
+            return "Potential trust-channel abuse exposure"
+        return _sentence_case(raw) if raw else (_sentence_case(fallback) if fallback else "Risk")
+
+    # Even with stronger evidence, avoid very narrow wording that implies certainty.
+    if any(
+        k in low
+        for k in (
+            "account takeover",
+            "credential theft",
+            "credential compromise",
+            "password reset abuse",
+            "login takeover",
+            "credential and account workflow",
+        )
+    ):
+        return "Unauthorized access exposure risk"
+    if any(k in low for k in ("payment fraud", "invoice diversion", "iban", "wire transfer", "billing abuse")):
+        return "Payment workflow abuse exposure risk"
+    if any(k in low for k in ("social engineering", "impersonation", "pretext", "partner impersonation", "channel confusion")):
+        return "Trust-channel impersonation exposure risk"
+    if any(k in low for k in ("privacy", "personal data", "data disclosure", "gdpr", "dpo")):
+        return "Unauthorized data access exposure risk"
+    return _sentence_case(raw) if raw else (_sentence_case(fallback) if fallback else "Risk")
+
+
 def _attack_type_phrase(*, primary_risk_type: str, risk_type: str, process_flags: dict | None = None) -> str:
     rt = str(risk_type or "").strip().lower()
     primary = str(primary_risk_type or "").strip().lower()
@@ -1920,7 +2005,7 @@ def _attack_type_phrase(*, primary_risk_type: str, risk_type: str, process_flags
         or any(k in primary for k in ("account takeover", "credential"))
         or "CREDENTIALS" in sens
     ):
-        return "Account takeover via identity verification abuse"
+        return "Potential unauthorized access through trust-channel abuse"
     if rt in {"impersonation", "downstream_pivot", "brand_abuse", "social_trust_surface_exposure"} or any(
         k in primary for k in ("social engineering", "partner impersonation", "channel confusion")
     ):
@@ -1950,7 +2035,7 @@ def _impact_phrase(*, risk_type: str, process_flags: dict | None = None, primary
         or any(k in primary for k in ("account takeover", "credential"))
         or "CREDENTIALS" in sens
     ):
-        return "account takeover and operational disruption"
+        return "unauthorized access to data and operational disruption"
     if rt in {"downstream_pivot", "impersonation", "brand_abuse", "social_trust_surface_exposure"}:
         return "fraudulent requests and client trust damage"
     return "operational disruption and reputational damage"
@@ -1965,7 +2050,7 @@ def _verdict_line(
     """
     attack = _attack_type_phrase(primary_risk_type=primary_risk_type, risk_type=risk_type, process_flags=process_flags)
     impact = _impact_phrase(risk_type=risk_type, process_flags=process_flags, primary_risk_type=primary_risk_type)
-    base = f"Top Risk: {attack} leading to {impact}."
+    base = f"Risk hypothesis: {attack} could lead to {impact}."
     words = base.split()
     if len(words) > 34:
         base = " ".join(words[:34]).rstrip(".") + "."
@@ -2263,6 +2348,121 @@ def _focused_evidence_subset(
     return [ev for _, ev in scored[:max_items]]
 
 
+_ABUSE_STAGE_LABELS = (
+    "Entry",
+    "Mapping",
+    "Preparation",
+    "Engagement",
+    "Exploitation",
+    "Outcome",
+    "Aftermath",
+)
+
+
+def _normalize_story_abuse_graph(
+    raw: Any,
+    *,
+    fallback_steps: list[dict[str, Any]] | None = None,
+    max_nodes: int = 12,
+    max_links: int = 20,
+) -> dict[str, Any]:
+    def _from_steps(steps: list[dict[str, Any]]) -> dict[str, Any]:
+        nodes: list[dict[str, Any]] = []
+        links: list[dict[str, Any]] = []
+        for idx, step in enumerate(list(steps or [])[:6], start=1):
+            if not isinstance(step, dict):
+                continue
+            node_id = f"s{idx}"
+            title = " ".join(str(step.get("title", "")).split()).strip()[:96] or f"Step {idx}"
+            detail = " ".join(str(step.get("detail", "") or step.get("brief", "")).split()).strip()[:220]
+            nodes.append({"id": node_id, "stage": idx - 1, "title": title, "detail": detail, "type": "step"})
+            if idx > 1:
+                links.append({"source": f"s{idx-1}", "target": node_id, "label": "", "weight": 3})
+        return {"nodes": nodes, "links": links}
+
+    if not isinstance(raw, dict):
+        base = _from_steps(list(fallback_steps or []))
+    else:
+        raw_nodes = raw.get("nodes") if isinstance(raw.get("nodes"), list) else []
+        raw_links = raw.get("links") if isinstance(raw.get("links"), list) else []
+        nodes: list[dict[str, Any]] = []
+        node_ids: set[str] = set()
+        for idx, item in enumerate(raw_nodes, start=1):
+            if not isinstance(item, dict):
+                continue
+            node_id = re.sub(r"[^a-zA-Z0-9_\-]", "", str(item.get("id", f"n{idx}"))).strip().lower() or f"n{idx}"
+            if node_id in node_ids:
+                continue
+            title = " ".join(str(item.get("title", "")).split()).strip()[:96]
+            detail = " ".join(str(item.get("detail", "")).split()).strip()[:220]
+            if not title and not detail:
+                continue
+            if not title:
+                title = f"Step {len(nodes) + 1}"
+            try:
+                stage = int(item.get("stage", len(nodes)))
+            except Exception:
+                stage = len(nodes)
+            stage = max(0, min(6, stage))
+            node_type = " ".join(str(item.get("type", "step")).split()).strip().lower() or "step"
+            if node_type not in {"entry", "action", "decision", "outcome", "step"}:
+                node_type = "step"
+            nodes.append({"id": node_id, "stage": stage, "title": title, "detail": detail, "type": node_type})
+            node_ids.add(node_id)
+            if len(nodes) >= max_nodes:
+                break
+        links: list[dict[str, Any]] = []
+        seen_links: set[str] = set()
+        for item in raw_links:
+            if not isinstance(item, dict):
+                continue
+            src = re.sub(r"[^a-zA-Z0-9_\-]", "", str(item.get("source", ""))).strip().lower()
+            dst = re.sub(r"[^a-zA-Z0-9_\-]", "", str(item.get("target", ""))).strip().lower()
+            if not src or not dst or src == dst or src not in node_ids or dst not in node_ids:
+                continue
+            label = " ".join(str(item.get("label", "")).split()).strip()[:90]
+            try:
+                weight = int(item.get("weight", 2) or 2)
+            except Exception:
+                weight = 2
+            weight = max(1, min(5, weight))
+            key = f"{src}|{dst}|{label.lower()}"
+            if key in seen_links:
+                continue
+            seen_links.add(key)
+            links.append({"source": src, "target": dst, "label": label, "weight": weight})
+            if len(links) >= max_links:
+                break
+        if not nodes:
+            base = _from_steps(list(fallback_steps or []))
+        else:
+            base = {"nodes": nodes[:max_nodes], "links": links[:max_links]}
+
+    nodes = list(base.get("nodes") or [])
+    links = list(base.get("links") or [])
+    if not links and len(nodes) > 1:
+        ordered = sorted(nodes, key=lambda x: (int(x.get("stage", 0) or 0), str(x.get("id", ""))))
+        for idx in range(1, len(ordered)):
+            src = str(ordered[idx - 1].get("id", ""))
+            dst = str(ordered[idx].get("id", ""))
+            if src and dst and src != dst:
+                links.append({"source": src, "target": dst, "label": "", "weight": 3})
+                if len(links) >= max_links:
+                    break
+
+    nodes.sort(key=lambda x: (int(x.get("stage", 0) or 0), str(x.get("id", ""))))
+    columns_map: dict[int, list[dict[str, Any]]] = {}
+    for n in nodes:
+        st = int(n.get("stage", 0) or 0)
+        columns_map.setdefault(st, []).append(n)
+    columns: list[dict[str, Any]] = []
+    for st in sorted(columns_map.keys()):
+        label = _ABUSE_STAGE_LABELS[st] if 0 <= st < len(_ABUSE_STAGE_LABELS) else f"Stage {st + 1}"
+        columns.append({"stage": st, "label": label, "nodes": columns_map.get(st, [])[:4]})
+
+    return {"nodes": nodes[:max_nodes], "links": links[:max_links], "columns": columns}
+
+
 def _priority_score(
     *,
     impact_band: str,
@@ -2273,7 +2473,7 @@ def _priority_score(
 ) -> float:
     """
     Deterministic shared ranking:
-      4*Impact + 3*Likelihood + 2*EvidenceStrength + min(3, SignalCoverage) + log(1+DistinctURLs)
+      4*Impact + 3*LikelihoodScore + 2*EvidenceStrength + min(3, SignalCoverage) + log(1+DistinctURLs)
     """
     i = IMPACT_SCORE.get((impact_band or "MED").upper(), 2)
     l = LIKELIHOOD_SCORE.get((likelihood or "med").lower(), 2)
@@ -2293,31 +2493,107 @@ def _sensitivity_value(level: str) -> int:
 
 
 def _likelihood_from_plausibility(
-    plausibility: int, *, signal_coverage: int, distinct_urls: int, evidence_refs_count: int
+    plausibility: int,
+    *,
+    signal_coverage: int,
+    distinct_urls: int,
+    evidence_refs_count: int,
+    evidence_strength_score: int = 0,
+    high_impact_workflow: bool = False,
+    potential_impact_score: int = 0,
+    signal_types: set[str] | None = None,
 ) -> str:
     p = int(max(0, min(100, plausibility)))
-    # Conservative calibration:
-    # - HIGH requires stronger evidence convergence (plausibility + breadth)
-    # - sparse exposure defaults to MED/LOW to avoid optimistic likelihood inflation
-    if p >= 85:
-        out = "high"
-    elif p >= 60:
-        out = "med"
-    else:
-        out = "low"
-
     cov = int(signal_coverage or 0)
     src = int(distinct_urls or 0)
     refs = int(evidence_refs_count or 0)
+    strength = int(max(0, min(100, int(evidence_strength_score or 0))))
+    st = {str(x).strip().upper() for x in (signal_types or set()) if str(x).strip()}
+    baseline_signal_types = {"CONTACT_CHANNEL", "EXTERNAL_ATTENTION", "ORG_CUE", "ROLE_TARGETABILITY_SIGNAL"}
+    surface_signal_types = baseline_signal_types | {"CHANNEL_AMBIGUITY_SIGNAL", "DIRECT_MESSAGE_WORKFLOW_SIGNAL"}
+    critical_signal_types = {
+        "PROCESS_CUE",
+        "VENDOR_CUE",
+        "INFRA_CUE",
+        "EMAIL_SPOOFING_RISK",
+        "DMARC_POLICY_WEAK",
+        "MULTIPLE_MX_PROVIDER",
+    }
+    baseline_only = bool(st) and st.issubset(baseline_signal_types)
+    contact_only = bool(st) and st.issubset({"CONTACT_CHANNEL", "EXTERNAL_ATTENTION"})
+    surface_only = bool(st) and st.issubset(surface_signal_types)
+    critical_types_count = len(st.intersection(critical_signal_types))
+    high_signal_density = cov >= 5 and refs >= 5 and src >= 4
 
-    if out == "high" and (cov < 3 or src < 3 or refs < 3):
+    if cov <= 0 or refs <= 0:
+        out = "low"
+    else:
+        exposure_score = p + (6 * min(5, cov)) + (5 * min(6, refs)) + (3 * min(6, src))
+        if strength >= 80:
+            exposure_score += 8
+        elif strength >= 70:
+            exposure_score += 4
+        elif strength < 60:
+            exposure_score -= 6
+        if bool(high_impact_workflow):
+            exposure_score += 8
+        if int(potential_impact_score or 0) >= 75:
+            exposure_score += 6
+        if contact_only:
+            exposure_score -= 16
+        elif baseline_only:
+            exposure_score -= 18
+        elif surface_only:
+            exposure_score -= 12
+
+        if exposure_score >= 130:
+            out = "high"
+        elif exposure_score >= 112:
+            out = "med-high"
+        elif exposure_score >= 90:
+            out = "med"
+        elif exposure_score >= 72:
+            out = "low-med"
+        else:
+            out = "low"
+
+    high_gate = (
+        p >= 90
+        and high_signal_density
+        and strength >= 80
+        and critical_types_count >= 2
+        and (bool(high_impact_workflow) or int(potential_impact_score or 0) >= 82)
+        and not surface_only
+    )
+    if out == "high" and not high_gate:
+        out = "med-high"
+
+    med_high_gate = (
+        (p >= 76 and cov >= 3 and refs >= 3 and strength >= 66 and critical_types_count >= 1)
+        or (p >= 84 and cov >= 4 and refs >= 4 and strength >= 70 and (bool(high_impact_workflow) or int(potential_impact_score or 0) >= 75))
+    )
+    if out == "med-high" and not med_high_gate:
         out = "med"
-    if out in {"high", "med"} and (cov < 2 or src < 2 or refs < 2):
-        out = "low"
-    if cov <= 1 and refs <= 2:
-        out = "low"
-    if cov == 0 or refs == 0:
-        out = "low"
+
+    if baseline_only and out in {"med", "med-high", "high"}:
+        out = "low-med"
+    if surface_only and out == "high":
+        out = "med"
+    if surface_only and out == "med-high" and not (bool(high_impact_workflow) and critical_types_count >= 1):
+        out = "med"
+    if contact_only and out == "high":
+        out = "med"
+    if contact_only and out == "med-high":
+        out = "low-med"
+    if cov <= 2 and refs <= 2 and out in {"med-high", "high"}:
+        out = "low-med"
+    if cov <= 1 and refs <= 2 and out in {"med", "med-high", "high"}:
+        out = "low-med"
+    if cov <= 3 and refs <= 3 and out == "high":
+        out = "med"
+    if int(potential_impact_score or 0) < 60 and out in {"med-high", "high"} and critical_types_count <= 1:
+        out = "med"
+
     return out
 
 
@@ -2348,7 +2624,7 @@ def _elevated_sort_tuple(item: dict[str, Any]) -> tuple[int, int, int, int, int,
     """
     return (
         IMPACT_SCORE.get(str(item.get("impact_band", "MED")).upper(), 2),
-        LIKELIHOOD_SCORE.get(str(item.get("likelihood", "med")).lower(), 2),
+        int(round(float(LIKELIHOOD_SCORE.get(str(item.get("likelihood", "med")).lower(), 2.0)) * 10)),
         int(item.get("confidence", 0) or 0),
         int(item.get("plausibility_score", 0) or 0),
         int(item.get("signal_coverage", 0) or 0),
@@ -3160,22 +3436,13 @@ def get_ranked_risks(
         evidence_strength = _evidence_strength_label(coverage)
         evidence_quality = _evidence_quality_label(meta)
 
-        primary_risk_type = str(getattr(h, "primary_risk_type", "") or "").strip()
+        primary_risk_type_raw = str(getattr(h, "primary_risk_type", "") or "").strip()
         outcome = _risk_outcome_label(
             str(h.risk_type or ""),
             sector=str(assessment.sector or ""),
             process_flags=parsed.process_flags,
         )
         risk_vector_summary = str(getattr(h, "risk_vector_summary", "") or "").strip()
-        title = _contextual_risk_headline(
-            primary_risk_type=primary_risk_type,
-            fallback_outcome=outcome,
-            risk_vector_summary=risk_vector_summary,
-            why_it_matters=str(getattr(h, "impact_rationale", "") or ""),
-            how_text=str(getattr(h, "description", "") or ""),
-            business_impact=str(getattr(h, "impact_rationale", "") or ""),
-            rationale=str(getattr(h, "impact_rationale", "") or ""),
-        )
 
         timeline = from_json(h.timeline_json or "[]", [])
         if not isinstance(timeline, list) or not timeline:
@@ -3352,10 +3619,35 @@ def get_ranked_risks(
             signal_coverage=int(signal_coverage),
             distinct_urls=int(evidence_refs_count),
             evidence_refs_count=int(evidence_refs_count),
+            evidence_strength_score=int(evidence_strength_pct),
+            high_impact_workflow=bool(high_impact_workflow),
+            potential_impact_score=int(potential_impact_score),
+            signal_types=set(signal_types),
         )
         impact_band = _impact_from_potential(
             potential_impact_score,
             linked_workflow_nodes_count=len(linked_nodes),
+        )
+
+        primary_risk_type = _conservative_primary_risk_type(
+            primary_risk_type=primary_risk_type_raw,
+            risk_type=str(h.risk_type or ""),
+            fallback_outcome=outcome,
+            signal_coverage=int(signal_coverage),
+            evidence_refs_count=int(evidence_refs_count),
+            evidence_strength_score=int(evidence_strength_pct),
+            plausibility_score=int(plausibility_score),
+            potential_impact_score=int(potential_impact_score),
+            signal_types=set(signal_types),
+        )
+        title = _contextual_risk_headline(
+            primary_risk_type=primary_risk_type,
+            fallback_outcome=outcome,
+            risk_vector_summary=risk_vector_summary,
+            why_it_matters=str(getattr(h, "impact_rationale", "") or ""),
+            how_text=str(getattr(h, "description", "") or ""),
+            business_impact=str(getattr(h, "impact_rationale", "") or ""),
+            rationale=str(getattr(h, "impact_rationale", "") or ""),
         )
 
         only_baseline_signals = bool(signal_types) and signal_types.issubset({"CONTACT_CHANNEL", "EXTERNAL_ATTENTION"})
@@ -3919,6 +4211,26 @@ def build_overview_viewmodel(
             sector=str(assessment.sector or ""),
             process_flags=top_process_flags,
         )
+    top_signal_types = {
+        str(ev.get("signal_type", "")).strip().upper()
+        for ev in (top_ev_valid or [])
+        if str(ev.get("signal_type", "")).strip()
+    }
+    primary_risk_type = _conservative_primary_risk_type(
+        primary_risk_type=primary_risk_type,
+        risk_type=str(top.get("risk_type", "")),
+        fallback_outcome=_risk_outcome_label(
+            str(top.get("risk_type", "")),
+            sector=str(assessment.sector or ""),
+            process_flags=top_process_flags,
+        ),
+        signal_coverage=int(top.get("signal_coverage", top.get("signal_diversity_count", 0)) or 0),
+        evidence_refs_count=int(top.get("evidence_refs_count", 0) or 0),
+        evidence_strength_score=int(top.get("confidence", 0) or 0),
+        plausibility_score=int(top.get("plausibility_score", 0) or 0),
+        potential_impact_score=int(top.get("potential_impact_score", 0) or 0),
+        signal_types=top_signal_types,
+    )
     primary_risk_type = _risk_display_name(
         primary_risk_type=primary_risk_type,
         fallback_outcome=_risk_outcome_label(
@@ -3970,6 +4282,23 @@ def build_overview_viewmodel(
             )
         ),
     }
+    try:
+        _top_reasoning = topRiskVerdict.get("reasoning") if isinstance(topRiskVerdict, dict) else {}
+        if isinstance(_top_reasoning, dict):
+            _rationale = " ".join(str(_top_reasoning.get("rationale", "")).split()).strip()
+            if not _rationale:
+                _how_struct = _top_reasoning.get("how_struct") if isinstance(_top_reasoning.get("how_struct"), dict) else {}
+                _rationale = " ".join(str(_how_struct.get("rationale", "")).split()).strip()
+            if not _rationale:
+                _why_full = " ".join(
+                    str(_top_reasoning.get("why_it_matters", "") or _top_reasoning.get("why", "")).split()
+                ).strip()
+                _rationale = _first_sentence(_why_full, max_chars=220)
+            if _rationale:
+                _top_reasoning["rationale"] = _rationale
+                topRiskVerdict["reasoning"] = _top_reasoning
+    except Exception:
+        pass
 
     confirm_points: list[str] = []
     deny_points: list[str] = []
@@ -4572,9 +4901,41 @@ def build_risk_detail_viewmodel(
         impact_band = str(ranked_row.get("impact_band", impact_band) or impact_band).upper()
         likelihood = str(ranked_row.get("likelihood", likelihood) or likelihood).strip().lower()[:8] or "med"
         current_status = str(ranked_row.get("status", current_status) or current_status).upper()
-    primary_risk_type = str(getattr(row, "primary_risk_type", "") or "").strip()
+    primary_risk_type_raw = str(getattr(row, "primary_risk_type", "") or "").strip()
+    detail_signal_types = {
+        str(ev.get("signal_type", "")).strip().upper()
+        for ev in (evidence_sets.get(f"risk:{rid}", []) or [])
+        if str(ev.get("signal_type", "")).strip()
+    }
+    detail_plausibility = int(
+        (
+            ranked_row.get("plausibility_score", 0)
+            if isinstance(ranked_row, dict)
+            else 0
+        )
+        or 0
+    )
+    detail_potential_impact = int(
+        (
+            ranked_row.get("potential_impact_score", 0)
+            if isinstance(ranked_row, dict)
+            else 0
+        )
+        or 0
+    )
     outcome = _risk_outcome_label(
         row_risk_type, sector=str(assessment.sector or ""), process_flags=parsed.process_flags
+    )
+    primary_risk_type = _conservative_primary_risk_type(
+        primary_risk_type=primary_risk_type_raw,
+        risk_type=row_risk_type,
+        fallback_outcome=outcome,
+        signal_coverage=int(diversity),
+        evidence_refs_count=int(len({str(ev.get("canonical_url", "")).strip() for ev in (evidence_sets.get(f"risk:{rid}", []) or []) if str(ev.get("canonical_url", "")).strip()})),
+        evidence_strength_score=int(conf),
+        plausibility_score=detail_plausibility,
+        potential_impact_score=detail_potential_impact,
+        signal_types=detail_signal_types,
     )
     risk_vector_summary = str(getattr(row, "risk_vector_summary", "") or "").strip()
     title = _contextual_risk_headline(
@@ -4941,6 +5302,9 @@ def build_risk_detail_viewmodel(
         rationale_for_title = " ".join(str(llm_hypothesis.get("rationale", "")).split()).strip()
     if not rationale_for_title:
         rationale_for_title = row_impact_rationale
+    rationale_for_title = _first_sentence(str(rationale_for_title or ""), max_chars=220)
+    if rationale_for_title:
+        risk_reasoning["rationale"] = rationale_for_title
     contextual_headline = _contextual_risk_headline(
         primary_risk_type=primary_risk_type,
         fallback_outcome=outcome,
@@ -5108,26 +5472,77 @@ def build_risk_detail_viewmodel(
     else:
         source_steps = list((risk.get("timeline") or [])[:6])
 
-    for idx, step in enumerate(source_steps, start=1):
-        if not isinstance(step, dict):
+    abuse_graph_raw = (llm_sections or {}).get("abuse_path_graph")
+    abuse_graph = _normalize_story_abuse_graph(abuse_graph_raw, fallback_steps=source_steps, max_nodes=12, max_links=20)
+    graph_nodes_rows: list[dict[str, Any]] = []
+    graph_node_map: dict[str, dict[str, Any]] = {}
+    for idx, node in enumerate(list(abuse_graph.get("nodes") or []), start=1):
+        if not isinstance(node, dict):
             continue
-        step_title = str(step.get("title", ""))[:90]
-        step_detail = str(step.get("brief", ""))[:180]
-        step_set_id = f"step:{rid}:{idx}"
-        evidence_sets[step_set_id] = _focused_evidence_subset(
+        node_id = re.sub(r"[^a-zA-Z0-9_\-]", "", str(node.get("id", f"n{idx}"))).strip().lower() or f"n{idx}"
+        node_title = " ".join(str(node.get("title", "")).split()).strip()[:96] or f"Step {idx}"
+        node_detail = " ".join(str(node.get("detail", "")).split()).strip()[:220]
+        try:
+            node_stage = int(node.get("stage", idx - 1) or idx - 1)
+        except Exception:
+            node_stage = idx - 1
+        node_stage = max(0, min(6, node_stage))
+        node_type = " ".join(str(node.get("type", "step")).split()).strip().lower() or "step"
+        node_set_id = f"abuse_node:{rid}:{node_id}"
+        evidence_sets[node_set_id] = _focused_evidence_subset(
             risk_evidence_pool,
-            seed_texts=[step_title, step_detail, str(primary_risk_type or ""), row_risk_type],
+            seed_texts=[node_title, node_detail, str(primary_risk_type or ""), row_risk_type],
             max_items=8,
         )
-        story_abuse_path.append(
-            {
-                "id": f"step:{int(step.get('step_index', 0) or 0)}",
-                "title": step_title,
-                "detail": step_detail,
-                "icon": "route",
-                "evidence_set_id": step_set_id,
-            }
-        )
+        row = {
+            "id": node_id,
+            "title": node_title,
+            "detail": node_detail,
+            "stage": node_stage,
+            "type": node_type,
+            "icon": "route",
+            "evidence_set_id": node_set_id,
+        }
+        graph_nodes_rows.append(row)
+        graph_node_map[node_id] = row
+
+    graph_links_rows: list[dict[str, Any]] = []
+    for link in list(abuse_graph.get("links") or []):
+        if not isinstance(link, dict):
+            continue
+        src = re.sub(r"[^a-zA-Z0-9_\-]", "", str(link.get("source", ""))).strip().lower()
+        dst = re.sub(r"[^a-zA-Z0-9_\-]", "", str(link.get("target", ""))).strip().lower()
+        if not src or not dst or src == dst:
+            continue
+        if src not in graph_node_map or dst not in graph_node_map:
+            continue
+        label = " ".join(str(link.get("label", "")).split()).strip()[:90]
+        try:
+            weight = int(link.get("weight", 2) or 2)
+        except Exception:
+            weight = 2
+        graph_links_rows.append({"source": src, "target": dst, "label": label, "weight": max(1, min(5, weight))})
+
+    graph_columns_rows: list[dict[str, Any]] = []
+    for col in list(abuse_graph.get("columns") or []):
+        if not isinstance(col, dict):
+            continue
+        try:
+            st = int(col.get("stage", 0) or 0)
+        except Exception:
+            st = 0
+        label = " ".join(str(col.get("label", f"Stage {st + 1}")).split()).strip() or f"Stage {st + 1}"
+        col_nodes: list[dict[str, Any]] = []
+        for n in list(col.get("nodes") or []):
+            if not isinstance(n, dict):
+                continue
+            nid = re.sub(r"[^a-zA-Z0-9_\-]", "", str(n.get("id", ""))).strip().lower()
+            if nid and nid in graph_node_map:
+                col_nodes.append(dict(graph_node_map[nid]))
+        if col_nodes:
+            graph_columns_rows.append({"stage": st, "label": label, "nodes": col_nodes})
+
+    story_abuse_path = sorted(graph_nodes_rows, key=lambda x: (int(x.get("stage", 0) or 0), str(x.get("id", ""))))[:6]
     impact_primary_set_id = f"impact:primary:{rid}"
     evidence_sets[impact_primary_set_id] = _focused_evidence_subset(
         risk_evidence_pool,
@@ -5173,6 +5588,11 @@ def build_risk_detail_viewmodel(
     story_map = {
         "signals": story_signals[:6],
         "abuse_path": story_abuse_path[:6],
+        "abuse_path_graph": {
+            "nodes": graph_nodes_rows[:12],
+            "links": graph_links_rows[:20],
+            "columns": graph_columns_rows[:7],
+        },
         "impacts": story_impacts[:4],
     }
 

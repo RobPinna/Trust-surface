@@ -37,8 +37,17 @@
 {% set _how_struct = reasoning.how_struct if reasoning.how_struct is defined and reasoning.how_struct else {} %}
 {% set _rationale_only = reasoning_rationale_only if reasoning_rationale_only is defined else false %}
 {% set _hide_how = reasoning_hide_how if reasoning_hide_how is defined else false %}
-{% if _rationale_only and _how_struct and _how_struct.get('rationale') %}
-  {% set _why_ns.text = (_how_struct.get('rationale') or '') | trim %}
+{% set _rationale_override = (reasoning_rationale_override if reasoning_rationale_override is defined else '') | trim %}
+{% if _rationale_only %}
+  {% if _rationale_override %}
+    {% set _why_ns.text = _rationale_override %}
+  {% elif reasoning.rationale is defined and (reasoning.rationale or '') | trim %}
+    {% set _why_ns.text = (reasoning.rationale or '') | trim %}
+  {% elif _how_struct and _how_struct.get('rationale') %}
+    {% set _why_ns.text = (_how_struct.get('rationale') or '') | trim %}
+  {% elif '. ' in _why_ns.text %}
+    {% set _why_ns.text = (_why_ns.text.split('. ', 1)[0] ~ '.') | trim %}
+  {% endif %}
 {% endif %}
 {% for _tail in ['Context:', 'Context :', 'Context -', 'Context'] %}
   {% if _why_ns.text.endswith(_tail) %}
