@@ -674,6 +674,7 @@ def assessment_overview(
         assessment,
         include_weak=False,
         include_baseline=bool(include_baseline),
+        generate_brief=False,
     )
 
     return request.app.state.templates.TemplateResponse(

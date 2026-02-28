@@ -1,6 +1,7 @@
 {% if reasoning %}
 {% set _compact = reasoning_compact if reasoning_compact is defined else false %}
 {% set _wws_raw = (reasoning.what_we_saw or '') | trim %}
+{% set _wws_struct = reasoning.what_we_saw_struct if reasoning.what_we_saw_struct is defined and reasoning.what_we_saw_struct else {} %}
 {% set _wws_summary = _wws_raw %}
 {% set _wws_signals_raw = '' %}
 {% if 'Sample signals:' in _wws_raw %}
@@ -8,18 +9,21 @@
   {% set _wws_summary = _wws_parts[0] | trim %}
   {% set _wws_signals_raw = _wws_parts[1] | trim %}
 {% endif %}
+{% if _wws_struct and _wws_struct.sample_signals is defined and _wws_struct.sample_signals %}
+  {% set _wws_signals_raw = (_wws_struct.sample_signals | join(' | ')) %}
+{% endif %}
 {% set _wws_signals = _wws_signals_raw | replace(' | ', '|') | replace('; ', '|') %}
-{% set _wws_evidence_count = '?' %}
-{% if ' linked evidence items' in _wws_summary %}
+{% set _wws_evidence_count = (_wws_struct.linked_evidence_items_count if _wws_struct and _wws_struct.linked_evidence_items_count is defined else '?') %}
+{% if _wws_evidence_count == '?' and ' linked evidence items' in _wws_summary %}
   {% set _wws_evidence_count = (_wws_summary.split(' linked evidence items', 1)[0].split()[-1]) %}
 {% endif %}
-{% set _wws_correlated_count = '?' %}
-{% if 'across ' in _wws_summary and ' signal types' in _wws_summary %}
-  {% set _wws_across_tail = _wws_summary.split('across ', 1)[1] %}
-  {% set _wws_correlated_count = _wws_across_tail.split(' signal types', 1)[0] | trim %}
+{% set _wws_correlated_count = (_wws_struct.correlated_indicators_count if _wws_struct and _wws_struct.correlated_indicators_count is defined else 0) %}
+{% if '(' in _wws_summary and 'correlated indicators' in _wws_summary and '+' in _wws_summary %}
+  {% set _wws_corr_tail = _wws_summary.split('+', 1)[1] %}
+  {% set _wws_correlated_count = _wws_corr_tail.split('correlated indicators', 1)[0] | replace(')', '') | trim %}
 {% endif %}
-{% set _wws_signal_types_text = '' %}
-{% if ' from ' in _wws_summary %}
+{% set _wws_signal_types_text = (_wws_struct.source_label if _wws_struct and _wws_struct.source_label is defined else '') %}
+{% if not _wws_signal_types_text and ' from ' in _wws_summary %}
   {% set _wws_signal_types_text = _wws_summary.split(' from ', 1)[1] | trim %}
 {% endif %}
 {% if '. Key conditions:' in _wws_signal_types_text %}
@@ -27,8 +31,8 @@
 {% elif ' Key conditions:' in _wws_signal_types_text %}
   {% set _wws_signal_types_text = _wws_signal_types_text.split(' Key conditions:', 1)[0] | trim %}
 {% endif %}
-{% set _wws_key_conditions = '' %}
-{% if 'Key conditions:' in _wws_summary %}
+{% set _wws_key_conditions = ((_wws_struct.key_conditions | join(', ')) if _wws_struct and _wws_struct.key_conditions is defined and _wws_struct.key_conditions else '') %}
+{% if not _wws_key_conditions and 'Key conditions:' in _wws_summary %}
   {% set _wws_key_conditions = _wws_summary.split('Key conditions:', 1)[1] | trim %}
 {% endif %}
 {% set _why_matters = (reasoning.why_it_matters or '') | replace('Impact is a conservative estimate based on exposed channels and workflow sensitivity cues.', '') | replace('Impact is a conservative estimate of business impact if the risk materializes.', '') | trim %}

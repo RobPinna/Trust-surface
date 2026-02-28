@@ -234,20 +234,40 @@ pre {
   z-index: 120;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  padding: 1.2rem 1.05rem 1.1rem;
+  justify-content: flex-start;
+  padding: 1.2rem 1.05rem 0.5rem;
   background: transparent;
-  border-right: 1px solid var(--color-ui-border);
+  border-right: 0;
   backdrop-filter: none;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
-.app-sidebar > div:first-child {
+.app-sidebar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--color-ui-border);
+  pointer-events: none;
+}
+
+.sidebar-main {
   min-height: 0;
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding-bottom: 0.22rem;
+}
+
+.sidebar-footer .sidebar-divider {
+  margin: 0.2rem 16px 0.56rem;
 }
 
 .brand-row {
@@ -301,7 +321,7 @@ pre {
   gap: 0;
 }
 
-.app-sidebar > div:first-child > .sidebar-nav:not(.sidebar-nav-secondary) {
+.sidebar-main > .sidebar-nav:not(.sidebar-nav-secondary) {
   margin-top: 20px;
 }
 
@@ -389,11 +409,11 @@ i[data-lucide],
 }
 
 .sidebar-nav-secondary {
-  margin-top: auto;
+  margin-top: 0;
 }
 
 .sidebar-user {
-  margin-top: 0.9rem;
+  margin-top: 0.55rem;
   border: 1px solid var(--color-ui-border);
   border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.012);

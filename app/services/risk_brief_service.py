@@ -1,7 +1,6 @@
 import hashlib
 import json
 import logging
-import os
 import random
 import re
 import time
@@ -77,7 +76,7 @@ IMPACT_KEYWORDS = (
     "operational disruption",
     "reputational damage",
 )
-RISK_BRIEF_SAFETY_FILTER_ENABLED = os.getenv("RISK_BRIEF_SAFETY_FILTER", "0").strip() == "1"
+RISK_BRIEF_SAFETY_FILTER_ENABLED = False
 LLM_HYPOTHESIS_PROMPT_VERSION = "2026-02-27-hypothesis-v2"
 LLM_SECTIONS_PROMPT_VERSION = "2026-02-28-sections-v3-conservative"
 

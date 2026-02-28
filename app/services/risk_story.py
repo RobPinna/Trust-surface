@@ -1815,6 +1815,15 @@ def _reasoning_block_for_risk(
     )
     return {
         "what_we_saw": what_we_saw,
+        "what_we_saw_struct": {
+            "linked_evidence_items_count": int(display_refs),
+            "risk_linked_count": int(refs),
+            "correlated_indicators_count": int(supplemental_indicator_count),
+            "signal_types_count": int(signal_types),
+            "source_label": str(source_label),
+            "key_conditions": list(bundle_names[:3]),
+            "sample_signals": list(sample_signals[:10]),
+        },
         "why_it_matters": why_it_matters,
         "why_severity": why_severity,
         "scope_boundary": scope_boundary,
@@ -2929,6 +2938,91 @@ def _pick_recipe_bundles(bundles: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if len(out) >= 3:
             break
     return out
+
+
+def _llm_recipe_title(value: str, *, max_chars: int = 96) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    text = re.sub(r"\[(?:E-\d{2,3}(?:\s*,\s*E-\d{2,3})*)\]", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"^\d+\s*[\)\.\:\-]\s*", "", text).strip()
+    text = _first_sentence(text, max_chars=max_chars).strip(" .,:;-")
+    return text[:max_chars]
+
+
+def _build_llm_recipe_bundles(
+    *,
+    llm_hypothesis: dict[str, Any] | None,
+    llm_sections: dict[str, Any] | None,
+    evidence_pool: list[dict[str, Any]],
+    max_items: int = 3,
+) -> list[dict[str, Any]]:
+    hyp = llm_hypothesis if isinstance(llm_hypothesis, dict) else {}
+    sections = llm_sections if isinstance(llm_sections, dict) else {}
+    evidence_rows = [ev for ev in (evidence_pool or []) if isinstance(ev, dict)]
+    if not evidence_rows:
+        return []
+
+    seeds: list[str] = []
+    for item in list(hyp.get("items") or [])[:6]:
+        line = _llm_recipe_title(str(item or ""), max_chars=120)
+        if line:
+            seeds.append(line)
+    for step in list(sections.get("abuse_path") or [])[:6]:
+        if not isinstance(step, dict):
+            continue
+        line = _llm_recipe_title(str(step.get("title", "") or step.get("detail", "")), max_chars=120)
+        if line:
+            seeds.append(line)
+    how_seed = _llm_recipe_title(str(sections.get("how", "") or ""), max_chars=120)
+    if how_seed:
+        seeds.append(how_seed)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for row in seeds:
+        key = re.sub(r"[^a-z0-9]+", " ", row.lower()).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+        if len(deduped) >= max_items:
+            break
+    if not deduped:
+        return []
+
+    bundles: list[dict[str, Any]] = []
+    why_seed = " ".join(str(sections.get("why_it_matters", "")).split()).strip()
+    impact_seed = " ".join(str(sections.get("business_impact", "")).split()).strip()
+    for idx, seed in enumerate(deduped, start=1):
+        focused = _focused_evidence_subset(
+            evidence_rows,
+            seed_texts=[seed, why_seed, impact_seed],
+            max_items=8,
+        )
+        signal_types = sorted(
+            {
+                str(ev.get("signal_type", "")).strip().upper()
+                for ev in (focused or [])
+                if str(ev.get("signal_type", "")).strip()
+            }
+        )[:6]
+        bundles.append(
+            {
+                "id": f"llm_recipe_{idx}",
+                "title": _llm_recipe_title(seed, max_chars=96) or f"LLM ingredient {idx}",
+                "display_name": _llm_recipe_title(seed, max_chars=96) or f"LLM ingredient {idx}",
+                "short_label": _llm_recipe_title(seed, max_chars=64) or f"Ingredient {idx}",
+                "internal_name": "LLM_CORRELATED",
+                "bundle_type": "LLM_CORRELATED",
+                "icon": "sparkles",
+                "tooltip": "LLM-correlated ingredient grounded in retrieved evidence.",
+                "item_count": int(len(focused or [])),
+                "signal_types": signal_types,
+                "evidence": list(focused or [])[:10],
+            }
+        )
+    return bundles[:max_items]
 
 
 def _confirm_deny_points(*, meta: dict, process_flags: dict | None) -> tuple[list[str], list[str]]:
@@ -5296,6 +5390,42 @@ def build_risk_detail_viewmodel(
             db.rollback()
         except Exception:
             pass
+
+    llm_recipe_bundles = _build_llm_recipe_bundles(
+        llm_hypothesis=llm_hypothesis,
+        llm_sections=llm_sections,
+        evidence_pool=risk_evidence_pool,
+        max_items=3,
+    )
+    if llm_recipe_bundles:
+        recipe_bundles = llm_recipe_bundles
+        ingredient_phrases = [
+            str(b.get("title", "")).strip() for b in recipe_bundles if str(b.get("title", "")).strip()
+        ]
+        if primary_risk_type and (
+            not risk_vector_summary or not _verdict_matches_bundles(risk_vector_summary, ingredient_phrases)
+        ):
+            risk_vector_summary = _verdict_line(
+                primary_risk_type=primary_risk_type,
+                risk_type=row_risk_type,
+                conditions=ingredient_phrases[:3],
+                process_flags=parsed.process_flags,
+            )
+            risk["risk_vector_summary"] = risk_vector_summary
+        for b in recipe_bundles:
+            evidence_sets[f"bundle:{b.get('id')}"] = list(b.get("evidence") or [])
+        refreshed_reasoning = _reasoning_block_for_risk(
+            risk=risk,
+            evidence=list(evidence_sets.get(f"risk:{rid}", []) or []),
+            recipe_bundles=recipe_bundles,
+            risk_vector_summary=risk_vector_summary,
+            supplemental_hints=coded_signal_lines,
+            supplemental_connectors=sorted(list(supplemental_connectors_set), key=_connector_sort_key)[:5],
+        )
+        if isinstance(refreshed_reasoning, dict):
+            risk_reasoning["what_we_saw"] = str(refreshed_reasoning.get("what_we_saw", risk_reasoning.get("what_we_saw", "")))
+            if isinstance(refreshed_reasoning.get("what_we_saw_struct"), dict):
+                risk_reasoning["what_we_saw_struct"] = dict(refreshed_reasoning.get("what_we_saw_struct") or {})
 
     llm_why = " ".join(str(llm_hypothesis.get("summary", "")).split()).strip()
     if not llm_why:

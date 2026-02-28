@@ -35,7 +35,7 @@
     <div class="app-shell-wrap">
       <div class="app-shell">
         <aside class="app-sidebar">
-          <div>
+          <div class="sidebar-main">
             <div class="brand-row mb-5">
               <a class="brand-mark" href="/assessments" aria-label="All assessments">
                 <i data-lucide="users"></i>
@@ -78,7 +78,8 @@
               </a>
             </nav>
             {% endif %}
-
+          </div>
+          <div class="sidebar-footer">
             <div class="sidebar-divider"></div>
             <nav class="sidebar-nav sidebar-nav-secondary text-sm">
               <a class="nav-link secondary {% if active == 'settings' %}active{% endif %}" href="/settings">
@@ -86,13 +87,12 @@
                 <span>Settings</span>
               </a>
             </nav>
-          </div>
-
-          <div class="sidebar-user">
-            <div class="avatar">{{ (request.session.get('username') or 'U')[:1] | upper }}</div>
-            <div>
-              <p class="user-name">{{ request.session.get('username') }}</p>
-              <p class="user-link">Local workspace session</p>
+            <div class="sidebar-user">
+              <div class="avatar">{{ (request.session.get('username') or 'U')[:1] | upper }}</div>
+              <div>
+                <p class="user-name">{{ request.session.get('username') }}</p>
+                <p class="user-link">Local workspace session</p>
+              </div>
             </div>
           </div>
         </aside>

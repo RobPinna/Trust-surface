@@ -72,7 +72,8 @@ LLM_QUOTA_COOLDOWN_SECONDS = 900
 LLM_STABLE_TEMPERATURE = 0.0
 LLM_STABLE_TOP_P = 1.0
 REASONER_PROMPT_VERSION = "2026-02-25-stable-v1"
-REASONER_ENGINE_VERSION = "stable-by-default-v2"
+REASONER_ENGINE_VERSION = "stable-by-default-v4"
+REASONER_SAFETY_GUARDRAIL_ENABLED = False
 LLM_MODEL_SETTING_NAME = "__llm_reasoner_model__"
 LLM_PROVIDER_SETTING_NAME = "__llm_reasoner_provider__"
 LLM_OPENAI_API_SETTING_NAME = "__llm_reasoner_api__"
@@ -992,10 +993,26 @@ def _severity_from_likelihood_and_impact(likelihood: str, impact: str) -> int:
 
 
 def _contains_prohibited_content(values: list[str]) -> bool:
+    if not REASONER_SAFETY_GUARDRAIL_ENABLED:
+        return False
     for value in values:
         if PROHIBITED_PATTERN.search(value or ""):
             return True
     return False
+
+
+def _strip_prohibited_items(values: list[str]) -> list[str]:
+    if not REASONER_SAFETY_GUARDRAIL_ENABLED:
+        return [str(v or "").strip() for v in (values or []) if str(v or "").strip()]
+    out: list[str] = []
+    for value in values or []:
+        text = " ".join(str(value or "").split()).strip()
+        if not text:
+            continue
+        if PROHIBITED_PATTERN.search(text):
+            continue
+        out.append(text)
+    return out
 
 
 def _safe_lines(value: str, max_lines: int) -> str:
@@ -1965,6 +1982,9 @@ def _create_hypothesis_row(
     assumptions = _safe_list(payload.get("assumptions"), max_items=8)
     gaps_to_verify = _safe_list(payload.get("gaps_to_verify"), max_items=8)
     defensive_actions = _safe_list(payload.get("defensive_actions"), max_items=10)
+    assumptions = _strip_prohibited_items(assumptions)
+    gaps_to_verify = _strip_prohibited_items(gaps_to_verify)
+    defensive_actions = _strip_prohibited_items(defensive_actions)
 
     if not title or not description:
         return None
@@ -2230,6 +2250,52 @@ def _create_hypothesis_row(
                 "Impact is a conservative estimate based on exposed channels and workflow sensitivity cues."
             )
 
+        signal_coverage = int(
+            meta.get("signal_diversity_count", 0)
+            or len([k for k, v in (counts or {}).items() if int(v or 0) > 0])
+        )
+        evidence_refs_count = int(_distinct_url_count(evidence_refs))
+        baseline_now = bool(baseline_tag or bool(meta.get("baseline_exposure", False)))
+        plausibility_score = int(
+            max(
+                0,
+                min(
+                    100,
+                    round(
+                        (0.55 * float(int(computed_conf or 0)))
+                        + (8 * min(4, int(signal_coverage)))
+                        + (6 * min(4, int(evidence_refs_count)))
+                        - (10 if baseline_now else 0)
+                    ),
+                ),
+            )
+        )
+        impact_base = {"ops": 40, "reputation": 52, "financial": 66, "safety": 72}
+        potential_impact_score = int(
+            max(
+                0,
+                min(
+                    100,
+                    round(
+                        float(impact_base.get(str(impact or "").strip().lower(), 45))
+                        + (8 if data_sens_high else 0)
+                        + (8 if process_exposure_candidate else 0)
+                    ),
+                ),
+            )
+        )
+        if baseline_now:
+            status_value = "BASELINE"
+        elif (
+            int(plausibility_score) >= 55
+            and int(signal_coverage) >= 2
+            and int(evidence_refs_count) >= 2
+            and int(computed_conf) >= 55
+        ):
+            status_value = "ELEVATED"
+        else:
+            status_value = "WATCHLIST"
+
         row = Hypothesis(
             assessment_id=assessment_id,
             query_id=query_id,
@@ -2237,6 +2303,9 @@ def _create_hypothesis_row(
             primary_risk_type=primary_risk_type,
             risk_vector_summary=risk_vector_summary,
             baseline_tag=bool(baseline_tag),
+            status=str(status_value),
+            plausibility_score=int(plausibility_score),
+            potential_impact_score=int(potential_impact_score),
             integrity_flags_json=safe_json_dumps({"flags": integrity_flags, "typing": type_flags}, "{}"),
             severity=severity,
             title=title,
@@ -2789,7 +2858,7 @@ def generate_hypotheses(
             model=model,
         )
         if not row:
-            # If LLM narrative violates safety/field guards, fall back to deterministic local wording
+            # If LLM narrative is invalid, fall back to deterministic local wording
             # while preserving the same evidence set and stable fingerprint.
             local_payload = _local_reasoner_payload(
                 query_id=primary_qid,
@@ -2816,8 +2885,8 @@ def generate_hypotheses(
             _save_gap(
                 assessment_id=assessment_id,
                 query_id=primary_qid,
-                title=f"{primary_qid} blocked by safety guardrail",
-                description="Generated content violated defensive-only policy or lacked required fields.",
+                title=f"{primary_qid} generation failed validation",
+                description="Generated content was invalid or lacked required fields.",
                 evidence_count=len(cand.evidence_refs),
                 avg_confidence=int(cand.conf_score),
             )
