@@ -136,8 +136,11 @@ class Settings:
         self.website_user_agent: str = os.getenv("WEBSITE_USER_AGENT", "ExposureMapperTI/1.0 (+local-assessment)")
         self.default_admin_user: str = os.getenv("DEFAULT_ADMIN_USER", "admin")
         self.default_admin_password: str = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin123!")
+        self.llm_provider: str = os.getenv("LLM_PROVIDER", "openai")
         self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
         self.openai_reasoner_model: str = os.getenv("OPENAI_REASONER_MODEL", "gpt-4.1")
+        self.anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+        self.anthropic_reasoner_model: str = os.getenv("ANTHROPIC_REASONER_MODEL", "claude-sonnet-4-6")
         self.openai_hypothesis_confidence_threshold: int = int(
             os.getenv("OPENAI_HYPOTHESIS_CONFIDENCE_THRESHOLD", "55")
         )

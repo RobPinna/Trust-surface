@@ -60,9 +60,28 @@ DEFAULT_SOURCES = [
     "shodan",
     "hibp_breach_domain",
 ]
-LLM_MODEL_OPTIONS = {"gpt-4.1", "gpt-4.1o", "LOCAL"}
-LLM_API_SETTING_NAME = "__llm_reasoner_api__"
+LLM_PROVIDER_OPTIONS = {"openai", "anthropic", "local"}
+LLM_MODEL_OPTIONS = {
+    "gpt-4.1",
+    "gpt-4.1o",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+    "claude-3-5-sonnet-latest",
+    "claude-3-7-sonnet-latest",
+    "LOCAL",
+}
+LLM_OPENAI_MODEL_OPTIONS = {"gpt-4.1", "gpt-4.1o"}
+LLM_ANTHROPIC_MODEL_OPTIONS = {
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+    "claude-3-5-sonnet-latest",
+    "claude-3-7-sonnet-latest",
+}
+LLM_API_SETTING_NAME = "__llm_reasoner_api__"  # legacy/OpenAI key slot
+LLM_OPENAI_API_SETTING_NAME = "__llm_reasoner_api__"
+LLM_ANTHROPIC_API_SETTING_NAME = "__llm_reasoner_anthropic_api__"
 LLM_MODEL_SETTING_NAME = "__llm_reasoner_model__"
+LLM_PROVIDER_SETTING_NAME = "__llm_reasoner_provider__"
 RAG_TOP_K_SETTING_NAME = "__rag_top_k__"
 RAG_MIN_RATIO_SETTING_NAME = "__rag_min_ratio__"
 logger = logging.getLogger(__name__)
@@ -312,71 +331,187 @@ def test_connector(db: Session, connector_name: str) -> tuple[bool, str]:
     return connector.ping(api_key=api_key)
 
 
+def _infer_provider_from_model(model: str) -> str:
+    value = " ".join(str(model or "").split()).strip().lower()
+    if value == "local":
+        return "local"
+    if value.startswith("claude"):
+        return "anthropic"
+    return "openai"
+
+
+def _default_model_for_provider(provider: str, settings) -> str:
+    p = " ".join(str(provider or "").split()).strip().lower()
+    if p == "anthropic":
+        model = " ".join(str(settings.anthropic_reasoner_model or "").split()).strip()
+        if model in LLM_ANTHROPIC_MODEL_OPTIONS:
+            return model
+        return "claude-sonnet-4-6"
+    if p == "local":
+        return "LOCAL"
+    model = " ".join(str(settings.openai_reasoner_model or "").split()).strip()
+    if model in LLM_OPENAI_MODEL_OPTIONS:
+        return model
+    return "gpt-4.1"
+
+
+def _sanitize_llm_selection(*, provider: str, model: str, settings) -> tuple[str, str]:
+    p = " ".join(str(provider or "").split()).strip().lower()
+    if p not in LLM_PROVIDER_OPTIONS:
+        p = _infer_provider_from_model(model)
+    if p not in LLM_PROVIDER_OPTIONS:
+        p = "openai"
+    m = " ".join(str(model or "").split()).strip()
+    if p == "local":
+        return "local", "LOCAL"
+    if p == "anthropic":
+        if m not in LLM_ANTHROPIC_MODEL_OPTIONS:
+            m = _default_model_for_provider("anthropic", settings)
+        return "anthropic", m
+    if m not in LLM_OPENAI_MODEL_OPTIONS:
+        m = _default_model_for_provider("openai", settings)
+    return "openai", m
+
+
 def get_llm_state(db: Session) -> dict:
     settings = get_settings()
-    env_api_key = (settings.openai_api_key or "").strip()
+    env_provider = " ".join(str(settings.llm_provider or "").split()).strip().lower() or "openai"
+    env_openai_key = (settings.openai_api_key or "").strip()
+    env_anthropic_key = (settings.anthropic_api_key or "").strip()
+    provider_row = get_connector_setting(db, LLM_PROVIDER_SETTING_NAME)
     model_row = get_connector_setting(db, LLM_MODEL_SETTING_NAME)
-    api_row = get_connector_setting(db, LLM_API_SETTING_NAME)
-    if not model_row:
-        return {
-            "model": "gpt-4.1",
-            "has_api_key": bool((api_row and api_row.api_key_obfuscated) or env_api_key),
-        }
-    decoded = deobfuscate_secret(model_row.api_key_obfuscated) if model_row.api_key_obfuscated else None
-    model = decoded if decoded in LLM_MODEL_OPTIONS else "gpt-4.1"
+    openai_api_row = get_connector_setting(db, LLM_OPENAI_API_SETTING_NAME)
+    anthropic_api_row = get_connector_setting(db, LLM_ANTHROPIC_API_SETTING_NAME)
+
+    decoded_provider = (
+        deobfuscate_secret(provider_row.api_key_obfuscated)
+        if (provider_row and provider_row.api_key_obfuscated)
+        else env_provider
+    )
+    decoded_model = (
+        deobfuscate_secret(model_row.api_key_obfuscated)
+        if (model_row and model_row.api_key_obfuscated)
+        else ""
+    )
+    provider, model = _sanitize_llm_selection(
+        provider=(decoded_provider or env_provider or "openai"),
+        model=(decoded_model or _default_model_for_provider((decoded_provider or env_provider or "openai"), settings)),
+        settings=settings,
+    )
+    has_openai_api_key = bool((openai_api_row and openai_api_row.api_key_obfuscated) or env_openai_key)
+    has_anthropic_api_key = bool((anthropic_api_row and anthropic_api_row.api_key_obfuscated) or env_anthropic_key)
+    selected_has_api_key = True if provider == "local" else (has_anthropic_api_key if provider == "anthropic" else has_openai_api_key)
     return {
+        "provider": provider,
         "model": model,
-        "has_api_key": bool((api_row and api_row.api_key_obfuscated) or env_api_key),
+        "has_api_key": bool(selected_has_api_key),
+        "has_openai_api_key": bool(has_openai_api_key),
+        "has_anthropic_api_key": bool(has_anthropic_api_key),
+        "provider_options": sorted(list(LLM_PROVIDER_OPTIONS)),
+        "openai_model_options": sorted(list(LLM_OPENAI_MODEL_OPTIONS)),
+        "anthropic_model_options": sorted(list(LLM_ANTHROPIC_MODEL_OPTIONS)),
     }
 
 
-def save_llm_setting(db: Session, model: str, api_key: str | None = None, clear_api_key: bool = False) -> None:
-    chosen = (model or "").strip()
-    if chosen not in LLM_MODEL_OPTIONS:
-        chosen = "gpt-4.1"
+def save_llm_setting(
+    db: Session,
+    *,
+    provider: str,
+    model: str,
+    openai_api_key: str | None = None,
+    anthropic_api_key: str | None = None,
+    clear_openai_api_key: bool = False,
+    clear_anthropic_api_key: bool = False,
+) -> None:
+    settings = get_settings()
+    chosen_provider, chosen_model = _sanitize_llm_selection(provider=provider, model=model, settings=settings)
+
+    provider_row = get_connector_setting(db, LLM_PROVIDER_SETTING_NAME)
+    if not provider_row:
+        provider_row = ConnectorSetting(name=LLM_PROVIDER_SETTING_NAME, enabled=True)
+        db.add(provider_row)
+    provider_row.enabled = True
+    provider_row.api_key_obfuscated = obfuscate_secret(chosen_provider)
 
     model_row = get_connector_setting(db, LLM_MODEL_SETTING_NAME)
     if not model_row:
         model_row = ConnectorSetting(name=LLM_MODEL_SETTING_NAME, enabled=True)
         db.add(model_row)
     model_row.enabled = True
-    model_row.api_key_obfuscated = obfuscate_secret(chosen)
+    model_row.api_key_obfuscated = obfuscate_secret(chosen_model)
 
-    api_row = get_connector_setting(db, LLM_API_SETTING_NAME)
-    if not api_row:
-        api_row = ConnectorSetting(name=LLM_API_SETTING_NAME, enabled=True)
-        db.add(api_row)
-    api_row.enabled = True
+    openai_row = get_connector_setting(db, LLM_OPENAI_API_SETTING_NAME)
+    if not openai_row:
+        openai_row = ConnectorSetting(name=LLM_OPENAI_API_SETTING_NAME, enabled=True)
+        db.add(openai_row)
+    openai_row.enabled = True
+    if clear_openai_api_key:
+        openai_row.api_key_obfuscated = ""
+    elif openai_api_key is not None and openai_api_key.strip():
+        openai_row.api_key_obfuscated = obfuscate_secret(openai_api_key.strip())
 
-    if clear_api_key:
-        api_row.api_key_obfuscated = ""
-    elif api_key is not None and api_key.strip():
-        api_row.api_key_obfuscated = obfuscate_secret(api_key.strip())
+    anthropic_row = get_connector_setting(db, LLM_ANTHROPIC_API_SETTING_NAME)
+    if not anthropic_row:
+        anthropic_row = ConnectorSetting(name=LLM_ANTHROPIC_API_SETTING_NAME, enabled=True)
+        db.add(anthropic_row)
+    anthropic_row.enabled = True
+    if clear_anthropic_api_key:
+        anthropic_row.api_key_obfuscated = ""
+    elif anthropic_api_key is not None and anthropic_api_key.strip():
+        anthropic_row.api_key_obfuscated = obfuscate_secret(anthropic_api_key.strip())
 
     db.commit()
 
 
 def get_llm_runtime_config(db: Session) -> dict:
     settings = get_settings()
-    env_model = (settings.openai_reasoner_model or "gpt-4.1").strip()
-    env_api_key = (settings.openai_api_key or "").strip() or None
-    model_row = get_connector_setting(db, LLM_MODEL_SETTING_NAME)
-    api_row = get_connector_setting(db, LLM_API_SETTING_NAME)
-    if not model_row:
-        return {
-            "model": env_model or "gpt-4.1",
-            "api_key": deobfuscate_secret(api_row.api_key_obfuscated)
-            if (api_row and api_row.api_key_obfuscated)
-            else env_api_key,
-        }
-    decoded_model = deobfuscate_secret(model_row.api_key_obfuscated) if model_row.api_key_obfuscated else None
-    model = decoded_model if decoded_model in LLM_MODEL_OPTIONS else (env_model or "gpt-4.1")
-    api_key = (
-        deobfuscate_secret(api_row.api_key_obfuscated) if (api_row and api_row.api_key_obfuscated) else env_api_key
+    env_provider = " ".join(str(settings.llm_provider or "").split()).strip().lower() or "openai"
+    env_openai_model = " ".join(str(settings.openai_reasoner_model or "gpt-4.1").split()).strip() or "gpt-4.1"
+    env_anthropic_model = (
+        " ".join(str(settings.anthropic_reasoner_model or "claude-sonnet-4-6").split()).strip()
+        or "claude-sonnet-4-6"
     )
+    env_openai_key = (settings.openai_api_key or "").strip() or None
+    env_anthropic_key = (settings.anthropic_api_key or "").strip() or None
+    provider_row = get_connector_setting(db, LLM_PROVIDER_SETTING_NAME)
+    model_row = get_connector_setting(db, LLM_MODEL_SETTING_NAME)
+    openai_api_row = get_connector_setting(db, LLM_OPENAI_API_SETTING_NAME)
+    anthropic_api_row = get_connector_setting(db, LLM_ANTHROPIC_API_SETTING_NAME)
+
+    decoded_provider = (
+        deobfuscate_secret(provider_row.api_key_obfuscated)
+        if (provider_row and provider_row.api_key_obfuscated)
+        else env_provider
+    )
+    decoded_model = deobfuscate_secret(model_row.api_key_obfuscated) if (model_row and model_row.api_key_obfuscated) else ""
+    model_fallback = env_openai_model if _infer_provider_from_model(decoded_provider) != "anthropic" else env_anthropic_model
+    provider, model = _sanitize_llm_selection(
+        provider=(decoded_provider or env_provider or "openai"),
+        model=(decoded_model or model_fallback),
+        settings=settings,
+    )
+    openai_key = (
+        deobfuscate_secret(openai_api_row.api_key_obfuscated)
+        if (openai_api_row and openai_api_row.api_key_obfuscated)
+        else env_openai_key
+    )
+    anthropic_key = (
+        deobfuscate_secret(anthropic_api_row.api_key_obfuscated)
+        if (anthropic_api_row and anthropic_api_row.api_key_obfuscated)
+        else env_anthropic_key
+    )
+    if provider == "anthropic":
+        api_key = anthropic_key
+    elif provider == "local":
+        api_key = None
+    else:
+        api_key = openai_key
     return {
+        "provider": provider,
         "model": model,
         "api_key": api_key,
+        "openai_api_key": openai_key,
+        "anthropic_api_key": anthropic_key,
     }
 
 

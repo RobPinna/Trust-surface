@@ -414,6 +414,163 @@ def _post_llm_with_backoff(
     return last_response
 
 
+def _normalize_provider(value: str) -> str:
+    p = " ".join(str(value or "").split()).strip().lower()
+    if p in {"anthropic", "claude"}:
+        return "anthropic"
+    if p in {"local"}:
+        return "local"
+    return "openai"
+
+
+def _extract_openai_text(body: dict[str, Any]) -> str:
+    return " ".join(
+        str(
+            (((body or {}).get("choices") or [{}])[0] or {})
+            .get("message", {})
+            .get("content", "")
+            or ""
+        ).split()
+    ).strip()
+
+
+def _extract_anthropic_text(body: dict[str, Any]) -> str:
+    chunks = (body or {}).get("content", [])
+    parts: list[str] = []
+    if isinstance(chunks, list):
+        for item in chunks:
+            if isinstance(item, dict) and str(item.get("type", "")).strip().lower() == "text":
+                text = " ".join(str(item.get("text", "")).split()).strip()
+                if text:
+                    parts.append(text)
+    text = " ".join(parts).strip()
+    if text:
+        return text
+    # Legacy/fallback shape
+    return " ".join(str((body or {}).get("completion", "") or "").split()).strip()
+
+
+def _parse_json_object_text(raw: str) -> dict[str, Any] | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+
+    def _load(candidate: str) -> dict[str, Any] | None:
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    parsed = _load(text)
+    if parsed is not None:
+        return parsed
+
+    if text.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.IGNORECASE)
+        parsed = _load(cleaned.strip())
+        if parsed is not None:
+            return parsed
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        parsed = _load(text[start : end + 1].strip())
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _call_llm_content(
+    *,
+    provider: str,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    timeout_seconds: int,
+    caller: str,
+    expect_json: bool = False,
+) -> str | None:
+    p = _normalize_provider(provider)
+    if p == "local":
+        return None
+    api_key_clean = str(api_key or "").strip()
+    model_clean = str(model or "").strip()
+    if not api_key_clean or not model_clean:
+        return None
+
+    if p == "anthropic":
+        payload_user = user_prompt
+        if expect_json:
+            payload_user = f"{user_prompt}\n\nReturn valid JSON only."
+        payload = {
+            "model": model_clean,
+            "temperature": 0,
+            "max_tokens": 1400,
+            "system": str(system_prompt or ""),
+            "messages": [
+                {"role": "user", "content": str(payload_user or "")},
+            ],
+        }
+        headers = {
+            "x-api-key": api_key_clean,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        try:
+            res = _post_llm_with_backoff(
+                url="https://api.anthropic.com/v1/messages",
+                payload=payload,
+                headers=headers,
+                timeout_seconds=timeout_seconds,
+                caller=caller,
+            )
+            if res is None:
+                logger.warning("%s LLM request failed after retry attempts without response", caller)
+                return None
+            if int(res.status_code or 0) >= 400:
+                logger.warning("%s LLM request failed: status=%s body=%s", caller, res.status_code, res.text[:400])
+                return None
+            body = res.json() if res is not None else {}
+            return _extract_anthropic_text(body)
+        except Exception:
+            logger.exception("%s LLM request failed unexpectedly (provider=anthropic)", caller)
+            return None
+
+    payload: dict[str, Any] = {
+        "model": model_clean,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": str(system_prompt or "")},
+            {"role": "user", "content": str(user_prompt or "")},
+        ],
+    }
+    if expect_json:
+        payload["response_format"] = {"type": "json_object"}
+    headers = {"Authorization": f"Bearer {api_key_clean}", "Content-Type": "application/json"}
+    try:
+        res = _post_llm_with_backoff(
+            url="https://api.openai.com/v1/chat/completions",
+            payload=payload,
+            headers=headers,
+            timeout_seconds=timeout_seconds,
+            caller=caller,
+        )
+        if res is None:
+            logger.warning("%s LLM request failed after retry attempts without response", caller)
+            return None
+        if int(res.status_code or 0) >= 400:
+            logger.warning("%s LLM request failed: status=%s body=%s", caller, res.status_code, res.text[:400])
+            return None
+        body = res.json() if res is not None else {}
+        return _extract_openai_text(body)
+    except Exception:
+        logger.exception("%s LLM request failed unexpectedly (provider=openai)", caller)
+        return None
+
+
 def _local_brief(inp: BriefInput, *, variant_offset: int = 0) -> str:
     attack = _attack_type_from_input(inp)
     impact = _impact_from_input(inp)
@@ -569,7 +726,14 @@ def _validate_brief_text(text: str, *, inp: BriefInput, recent_briefs: list[str]
     return True, "ok"
 
 
-def _call_llm(*, api_key: str, model: str, inp: BriefInput, retry_hint: str = "") -> str | None:
+def _call_llm(
+    *,
+    provider: str,
+    api_key: str,
+    model: str,
+    inp: BriefInput,
+    retry_hint: str = "",
+) -> str | None:
     # Evidence-bound structured context (LLM is only used for wording at temperature=0).
     attack_type = _attack_type_from_input(inp)
     impact_phrase = _impact_from_input(inp)
@@ -612,32 +776,17 @@ def _call_llm(*, api_key: str, model: str, inp: BriefInput, retry_hint: str = ""
         f"{('Retry hint: ' + retry_hint) if retry_hint else ''}\n\n"
         "JSON context:\n" + json.dumps(payload_ctx, ensure_ascii=True)
     )
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
-        res = _post_llm_with_backoff(
-            url="https://api.openai.com/v1/chat/completions",
-            payload=payload,
-            headers=headers,
+        text = _call_llm_content(
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             timeout_seconds=35,
             caller="RiskBrief",
+            expect_json=False,
         )
-        if res is None:
-            logger.warning("Risk brief LLM request failed after retry attempts without response")
-            return None
-        if res.status_code >= 400:
-            logger.warning("Risk brief LLM request failed: status=%s body=%s", res.status_code, res.text[:400])
-            return None
-        body = res.json()
-        content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
-        text = " ".join(str(content or "").split())
         if not text:
             return None
         text = _rewrite_abstract_terms(text)
@@ -686,9 +835,10 @@ def get_or_generate_brief(
         return ""
 
     llm_cfg = get_llm_runtime_config(db)
+    provider = str(llm_cfg.get("provider") or "openai").strip().lower()
     model = str(llm_cfg.get("model") or "LOCAL").strip()
     api_key = str(llm_cfg.get("api_key") or "").strip()
-    is_local = model.upper() == "LOCAL" or not api_key
+    is_local = provider == "local" or model.upper() == "LOCAL" or not api_key
 
     recent = [
         str(x.brief or "")
@@ -725,7 +875,13 @@ def get_or_generate_brief(
                     "Strict rewrite required. Previous draft failed validation: "
                     f"{last_reason or 'unknown'}. Keep only concrete attacker action, concrete mechanism, and concrete impact in first paragraph."
                 )
-            out = _call_llm(api_key=api_key, model=model, inp=inp, retry_hint=hint)
+            out = _call_llm(
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                inp=inp,
+                retry_hint=hint,
+            )
             if not out:
                 continue
             out = _rewrite_abstract_terms(out)
@@ -858,6 +1014,7 @@ def _local_how_from_abuse_path(
 
 def _call_llm_how(
     *,
+    provider: str,
     api_key: str,
     model: str,
     primary_risk_type: str,
@@ -896,29 +1053,17 @@ def _call_llm_how(
         "JSON context:\n"
         + json.dumps(payload_ctx, ensure_ascii=True)
     )
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
-        res = _post_llm_with_backoff(
-            url="https://api.openai.com/v1/chat/completions",
-            payload=payload,
-            headers=headers,
+        content = _call_llm_content(
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             timeout_seconds=30,
             caller="RiskHow",
+            expect_json=False,
         )
-        if res is None or int(res.status_code or 0) >= 400:
-            if res is not None and int(res.status_code or 0) >= 400:
-                logger.warning("Risk HOW LLM request failed: status=%s", res.status_code)
-            return None
-        body = res.json()
-        content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
         text = _sanitize_how_text(str(content or ""))
         if not text:
             return None
@@ -979,9 +1124,10 @@ def get_or_generate_how_text(
         return str(existing.brief).strip()
 
     llm_cfg = get_llm_runtime_config(db)
+    provider = str(llm_cfg.get("provider") or "openai").strip().lower()
     model = str(llm_cfg.get("model") or "LOCAL").strip()
     api_key = str(llm_cfg.get("api_key") or "").strip()
-    is_local = model.upper() == "LOCAL" or not api_key
+    is_local = provider == "local" or model.upper() == "LOCAL" or not api_key
 
     how_text = ""
     if not is_local:
@@ -991,6 +1137,7 @@ def get_or_generate_how_text(
             if attempt == 1 and last_empty:
                 hint = "Use simpler sentence structure and directly connect step 1 -> step 2 -> step 3."
             out = _call_llm_how(
+                provider=provider,
                 api_key=api_key,
                 model=model,
                 primary_risk_type=primary_risk_type,
@@ -1113,7 +1260,7 @@ def _parse_llm_hypothesis_blob(blob: str) -> dict[str, Any] | None:
     if not text:
         return None
     try:
-        payload = json.loads(text)
+        payload = _parse_json_object_text(text)
         if not isinstance(payload, dict):
             return None
         items = _safe_hypothesis_items(payload.get("items") or payload.get("hypotheses") or [])
@@ -1239,6 +1386,7 @@ def _local_llm_hypothesis_payload(
 
 def _call_llm_risk_hypothesis(
     *,
+    provider: str,
     api_key: str,
     model: str,
     primary_risk_type: str,
@@ -1279,31 +1427,18 @@ def _call_llm_risk_hypothesis(
         "JSON context:\n"
         + json.dumps(ctx, ensure_ascii=True)
     )
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
-        res = _post_llm_with_backoff(
-            url="https://api.openai.com/v1/chat/completions",
-            payload=payload,
-            headers=headers,
+        content = _call_llm_content(
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             timeout_seconds=35,
             caller="RiskHypothesis",
+            expect_json=True,
         )
-        if res is None or int(res.status_code or 0) >= 400:
-            if res is not None and int(res.status_code or 0) >= 400:
-                logger.warning("Risk hypothesis LLM request failed: status=%s", res.status_code)
-            return None
-        body = res.json()
-        content = body.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-        parsed = json.loads(str(content or "{}"))
+        parsed = _parse_json_object_text(str(content or ""))
         if not isinstance(parsed, dict):
             return None
         items = _safe_hypothesis_items(parsed.get("hypotheses") or [], max_items=4)
@@ -1391,13 +1526,15 @@ def get_or_generate_llm_hypothesis(
         }
 
     llm_cfg = get_llm_runtime_config(db)
+    provider = str(llm_cfg.get("provider") or "openai").strip().lower()
     model = str(llm_cfg.get("model") or "LOCAL").strip()
     api_key = str(llm_cfg.get("api_key") or "").strip()
-    is_local = model.upper() == "LOCAL" or not api_key
+    is_local = provider == "local" or model.upper() == "LOCAL" or not api_key
 
     payload: dict[str, Any] | None = None
     if not is_local:
         payload = _call_llm_risk_hypothesis(
+            provider=provider,
             api_key=api_key,
             model=model,
             primary_risk_type=primary_risk_type,
@@ -1809,10 +1946,7 @@ def _parse_llm_sections_blob(blob: str) -> dict[str, Any] | None:
     raw = str(blob or "").strip()
     if not raw:
         return None
-    try:
-        payload = json.loads(raw)
-    except Exception:
-        return None
+    payload = _parse_json_object_text(raw)
     if not isinstance(payload, dict):
         return None
     why_it_matters = _safe_section_line(str(payload.get("why_it_matters", "")), max_chars=320)
@@ -1990,6 +2124,7 @@ def _local_llm_sections_payload(
 
 def _call_llm_risk_sections(
     *,
+    provider: str,
     api_key: str,
     model: str,
     primary_risk_type: str,
@@ -2046,30 +2181,17 @@ def _call_llm_risk_sections(
         "JSON context:\n"
         + json.dumps(ctx, ensure_ascii=True)
     )
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
-        res = _post_llm_with_backoff(
-            url="https://api.openai.com/v1/chat/completions",
-            payload=payload,
-            headers=headers,
+        content = _call_llm_content(
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             timeout_seconds=40,
             caller="RiskSections",
+            expect_json=True,
         )
-        if res is None or int(res.status_code or 0) >= 400:
-            if res is not None and int(res.status_code or 0) >= 400:
-                logger.warning("Risk sections LLM request failed: status=%s", res.status_code)
-            return None
-        body = res.json()
-        content = body.get("choices", [{}])[0].get("message", {}).get("content", "{}")
         parsed = _parse_llm_sections_blob(str(content or ""))
         if not parsed:
             return None
@@ -2152,13 +2274,15 @@ def get_or_generate_llm_risk_sections(
         return {}
 
     llm_cfg = get_llm_runtime_config(db)
+    provider = str(llm_cfg.get("provider") or "openai").strip().lower()
     model = str(llm_cfg.get("model") or "LOCAL").strip()
     api_key = str(llm_cfg.get("api_key") or "").strip()
-    is_local = model.upper() == "LOCAL" or not api_key
+    is_local = provider == "local" or model.upper() == "LOCAL" or not api_key
 
     payload: dict[str, Any] | None = None
     if not is_local:
         payload = _call_llm_risk_sections(
+            provider=provider,
             api_key=api_key,
             model=model,
             primary_risk_type=primary_risk_type,

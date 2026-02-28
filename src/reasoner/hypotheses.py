@@ -73,9 +73,80 @@ LLM_STABLE_TEMPERATURE = 0.0
 LLM_STABLE_TOP_P = 1.0
 REASONER_PROMPT_VERSION = "2026-02-25-stable-v1"
 REASONER_ENGINE_VERSION = "stable-by-default-v2"
+LLM_MODEL_SETTING_NAME = "__llm_reasoner_model__"
+LLM_PROVIDER_SETTING_NAME = "__llm_reasoner_provider__"
+LLM_OPENAI_API_SETTING_NAME = "__llm_reasoner_api__"
+LLM_ANTHROPIC_API_SETTING_NAME = "__llm_reasoner_anthropic_api__"
 
 _llm_quota_block_until = 0.0
 _llm_quota_last_notice = 0.0
+
+
+def _normalize_provider(value: str) -> str:
+    p = " ".join(str(value or "").split()).strip().lower()
+    if p in {"anthropic", "claude"}:
+        return "anthropic"
+    if p in {"local"}:
+        return "local"
+    return "openai"
+
+
+def _extract_openai_text(body: dict[str, Any]) -> str:
+    return " ".join(
+        str(
+            (((body or {}).get("choices") or [{}])[0] or {})
+            .get("message", {})
+            .get("content", "")
+            or ""
+        ).split()
+    ).strip()
+
+
+def _extract_anthropic_text(body: dict[str, Any]) -> str:
+    chunks = (body or {}).get("content", [])
+    parts: list[str] = []
+    if isinstance(chunks, list):
+        for item in chunks:
+            if isinstance(item, dict) and str(item.get("type", "")).strip().lower() == "text":
+                text = " ".join(str(item.get("text", "")).split()).strip()
+                if text:
+                    parts.append(text)
+    text = " ".join(parts).strip()
+    if text:
+        return text
+    return " ".join(str((body or {}).get("completion", "") or "").split()).strip()
+
+
+def _parse_json_object_text(raw: str) -> dict[str, Any] | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+
+    def _load(candidate: str) -> dict[str, Any] | None:
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    parsed = _load(text)
+    if parsed is not None:
+        return parsed
+
+    if text.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.IGNORECASE)
+        parsed = _load(cleaned.strip())
+        if parsed is not None:
+            return parsed
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        parsed = _load(text[start : end + 1].strip())
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _retry_after_seconds(headers: dict[str, Any] | Any) -> float:
@@ -766,6 +837,7 @@ def _compute_input_fingerprint(
     *,
     assessment_id: int,
     sections: list[dict[str, Any]],
+    provider: str,
     model: str,
     confidence_threshold: int,
     allow_local_fallback: bool,
@@ -775,6 +847,7 @@ def _compute_input_fingerprint(
         "engine_version": REASONER_ENGINE_VERSION,
         "prompt_version": REASONER_PROMPT_VERSION,
         "assessment_id": int(assessment_id),
+        "provider": _normalize_provider(provider),
         "model": str(model or ""),
         "confidence_threshold": int(confidence_threshold),
         "temperature": LLM_STABLE_TEMPERATURE,
@@ -1624,6 +1697,7 @@ def _trust_friction_for_assessment(assessment_id: int) -> bool:
 
 def _call_reasoner_llm(
     *,
+    provider: str,
     api_key: str,
     model: str,
     query_id: str,
@@ -1674,25 +1748,58 @@ def _call_reasoner_llm(
         "- Do NOT claim ongoing malicious activity; describe opportunity and uncertainty.\n"
         "- Keep 'description' concise and defensible.\n"
     )
-    payload = {
-        "model": model,
-        "temperature": LLM_STABLE_TEMPERATURE,
-        "top_p": LLM_STABLE_TOP_P,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    provider_norm = _normalize_provider(provider)
+    model_name = str(model or "").strip()
+    api_key_clean = str(api_key or "").strip()
+    if provider_norm == "local" or not model_name or not api_key_clean:
+        return None
+
     try:
-        res = _post_llm_with_backoff(
-            url="https://api.openai.com/v1/chat/completions",
-            payload=payload,
-            headers=headers,
-            timeout_seconds=30,
-            caller="Reasoner",
-        )
+        if provider_norm == "anthropic":
+            payload = {
+                "model": model_name,
+                "temperature": LLM_STABLE_TEMPERATURE,
+                "max_tokens": 1400,
+                "system": system_prompt,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f"{user_prompt}\n\nReturn valid JSON only.",
+                    }
+                ],
+            }
+            headers = {
+                "x-api-key": api_key_clean,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            res = _post_llm_with_backoff(
+                url="https://api.anthropic.com/v1/messages",
+                payload=payload,
+                headers=headers,
+                timeout_seconds=40,
+                caller="Reasoner",
+            )
+        else:
+            payload = {
+                "model": model_name,
+                "temperature": LLM_STABLE_TEMPERATURE,
+                "top_p": LLM_STABLE_TOP_P,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            }
+            headers = {"Authorization": f"Bearer {api_key_clean}", "Content-Type": "application/json"}
+            res = _post_llm_with_backoff(
+                url="https://api.openai.com/v1/chat/completions",
+                payload=payload,
+                headers=headers,
+                timeout_seconds=30,
+                caller="Reasoner",
+            )
+
         if res is None:
             logger.warning("Reasoner LLM request failed after retry attempts without response")
             return None
@@ -1700,8 +1807,12 @@ def _call_reasoner_llm(
             logger.warning("Reasoner LLM request failed: status=%s body=%s", res.status_code, res.text[:400])
             return None
         body = res.json()
-        content = body.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-        return json.loads(content)
+        if provider_norm == "anthropic":
+            content = _extract_anthropic_text(body)
+        else:
+            content = _extract_openai_text(body)
+        parsed = _parse_json_object_text(content)
+        return parsed if isinstance(parsed, dict) else None
     except Exception:
         logger.exception("Reasoner LLM request failed unexpectedly")
         return None
@@ -1834,6 +1945,7 @@ def _create_hypothesis_row(
     relevance_debug: dict[str, Any] | None = None,
     trust_friction: bool | None = None,
     input_fingerprint: str = "",
+    provider: str = "openai",
     model: str = "",
 ) -> Hypothesis | None:
     risk_type = str(payload.get("risk_type", "other")).strip().lower()
@@ -2016,6 +2128,7 @@ def _create_hypothesis_row(
         signal_counts_for_storage["__input_fingerprint__"] = str(input_fingerprint or "")
         signal_counts_for_storage["__engine_version__"] = REASONER_ENGINE_VERSION
         signal_counts_for_storage["__prompt_version__"] = REASONER_PROMPT_VERSION
+        signal_counts_for_storage["__llm_provider__"] = _normalize_provider(provider)
         signal_counts_for_storage["__llm_model__"] = str(model or "")
         if relevance_debug:
             signal_counts_for_storage["__debug__"] = {"relevance": relevance_debug}
@@ -2191,6 +2304,7 @@ def _persist_snapshot(
     *,
     assessment_id: int,
     input_fingerprint: str,
+    provider: str,
     model: str,
 ) -> None:
     with SessionLocal() as db:
@@ -2214,6 +2328,7 @@ def _persist_snapshot(
         "input_fingerprint": str(input_fingerprint or ""),
         "engine_version": REASONER_ENGINE_VERSION,
         "prompt_version": REASONER_PROMPT_VERSION,
+        "provider": _normalize_provider(provider),
         "model": str(model or ""),
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "hypotheses": [
@@ -2327,25 +2442,43 @@ def _restore_snapshot(assessment_id: int, snapshot: dict[str, Any]) -> list[Hypo
     return _cards_from_rows(restored_rows)
 
 
-def _load_llm_config() -> tuple[str, str | None]:
-    """Return selected model and API key from DB settings, with env fallback."""
-    model_key_name = "__llm_reasoner_model__"
-    api_key_name = "__llm_reasoner_api__"
+def _load_llm_config() -> tuple[str, str, str | None]:
+    """Return selected provider/model/API key from DB settings, with env fallback."""
     with SessionLocal() as db:
-        model_row = (
+        provider_row = (
             db.execute(
                 select(ConnectorSetting)
-                .where(ConnectorSetting.name == model_key_name)
+                .where(ConnectorSetting.name == LLM_PROVIDER_SETTING_NAME)
                 .order_by(ConnectorSetting.updated_at.desc(), ConnectorSetting.id.desc())
                 .limit(1)
             )
             .scalars()
             .first()
         )
-        api_row = (
+        model_row = (
             db.execute(
                 select(ConnectorSetting)
-                .where(ConnectorSetting.name == api_key_name)
+                .where(ConnectorSetting.name == LLM_MODEL_SETTING_NAME)
+                .order_by(ConnectorSetting.updated_at.desc(), ConnectorSetting.id.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        openai_api_row = (
+            db.execute(
+                select(ConnectorSetting)
+                .where(ConnectorSetting.name == LLM_OPENAI_API_SETTING_NAME)
+                .order_by(ConnectorSetting.updated_at.desc(), ConnectorSetting.id.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        anthropic_api_row = (
+            db.execute(
+                select(ConnectorSetting)
+                .where(ConnectorSetting.name == LLM_ANTHROPIC_API_SETTING_NAME)
                 .order_by(ConnectorSetting.updated_at.desc(), ConnectorSetting.id.desc())
                 .limit(1)
             )
@@ -2354,26 +2487,65 @@ def _load_llm_config() -> tuple[str, str | None]:
         )
 
     settings = get_settings()
-    env_model = (settings.openai_reasoner_model or "gpt-4.1").strip()
-    env_api_key = (settings.openai_api_key or "").strip() or None
-    if model_row:
-        decoded_model = deobfuscate_secret(model_row.api_key_obfuscated) if model_row.api_key_obfuscated else None
-        model = (decoded_model or env_model or "gpt-4.1").strip()
-        api_key = deobfuscate_secret(api_row.api_key_obfuscated) if (api_row and api_row.api_key_obfuscated) else None
-        return model, (api_key or env_api_key)
+    env_provider = _normalize_provider(getattr(settings, "llm_provider", "openai"))
+    env_openai_model = (settings.openai_reasoner_model or "gpt-4.1").strip()
+    env_anthropic_model = (getattr(settings, "anthropic_reasoner_model", "") or "claude-sonnet-4-6").strip()
+    env_openai_api_key = (settings.openai_api_key or "").strip() or None
+    env_anthropic_api_key = (getattr(settings, "anthropic_api_key", "") or "").strip() or None
 
-    model = env_model
-    api_key = env_api_key
-    return model, api_key
+    decoded_provider = (
+        deobfuscate_secret(provider_row.api_key_obfuscated) if (provider_row and provider_row.api_key_obfuscated) else None
+    )
+    decoded_model = deobfuscate_secret(model_row.api_key_obfuscated) if (model_row and model_row.api_key_obfuscated) else None
+    decoded_openai_api = (
+        deobfuscate_secret(openai_api_row.api_key_obfuscated)
+        if (openai_api_row and openai_api_row.api_key_obfuscated)
+        else None
+    )
+    decoded_anthropic_api = (
+        deobfuscate_secret(anthropic_api_row.api_key_obfuscated)
+        if (anthropic_api_row and anthropic_api_row.api_key_obfuscated)
+        else None
+    )
+
+    model = str(decoded_model or "").strip()
+    provider = _normalize_provider(decoded_provider or "")
+    if not decoded_provider:
+        if model and model.lower().startswith("claude-"):
+            provider = "anthropic"
+        elif model.upper() == "LOCAL":
+            provider = "local"
+        else:
+            provider = env_provider
+
+    if not model:
+        if provider == "anthropic":
+            model = env_anthropic_model or "claude-sonnet-4-6"
+        elif provider == "local":
+            model = "LOCAL"
+        else:
+            model = env_openai_model or "gpt-4.1"
+
+    if provider == "anthropic":
+        api_key = decoded_anthropic_api or env_anthropic_api_key
+    elif provider == "local":
+        api_key = None
+    else:
+        api_key = decoded_openai_api or env_openai_api_key
+
+    return provider, model, api_key
 
 
-def _resolve_openai_model(model: str) -> tuple[str, bool]:
-    value = (model or "gpt-4.1").strip()
-    if value.upper() == "LOCAL":
-        return "LOCAL", True
+def _resolve_model_selection(provider: str, model: str) -> tuple[str, str, bool]:
+    provider_norm = _normalize_provider(provider)
+    value = (model or "").strip()
+    if provider_norm == "local" or value.upper() == "LOCAL":
+        return "local", "LOCAL", True
+    if provider_norm == "anthropic":
+        return "anthropic", (value or "claude-sonnet-4-6"), False
     if value == "gpt-4.1o":
-        return "gpt-4o", False
-    return value or "gpt-4.1", False
+        return "openai", "gpt-4o", False
+    return "openai", (value or "gpt-4.1"), False
 
 
 def generate_hypotheses(
@@ -2394,12 +2566,13 @@ def generate_hypotheses(
 
     settings = get_settings()
     threshold = max(1, min(100, int(settings.openai_hypothesis_confidence_threshold)))
-    configured_model, configured_api_key = _load_llm_config()
-    model, force_local_mode = _resolve_openai_model(configured_model)
+    configured_provider, configured_model, configured_api_key = _load_llm_config()
+    provider, model, force_local_mode = _resolve_model_selection(configured_provider, configured_model)
     api_key = (configured_api_key or "").strip()
     input_fingerprint = _compute_input_fingerprint(
         assessment_id=assessment_id,
         sections=sections,
+        provider=provider,
         model=model,
         confidence_threshold=threshold,
         allow_local_fallback=allow_local_fallback,
@@ -2458,7 +2631,7 @@ def generate_hypotheses(
                 assessment_id=assessment_id,
                 query_id=query_id,
                 title=f"{query_id} generation degraded",
-                description="LLM API key not configured for selected model. Using deterministic local synthesis.",
+                description="LLM API key not configured for selected provider/model. Using deterministic local synthesis.",
                 evidence_count=len(raw_evidence),
                 avg_confidence=_avg_confidence(raw_evidence),
             )
@@ -2472,6 +2645,7 @@ def generate_hypotheses(
             )
         else:
             payload = _call_reasoner_llm(
+                provider=provider,
                 api_key=api_key,
                 model=model,
                 query_id=query_id,
@@ -2611,6 +2785,7 @@ def generate_hypotheses(
             relevance_debug=cand.relevance_debug,
             trust_friction=trust_friction,
             input_fingerprint=input_fingerprint,
+            provider=provider,
             model=model,
         )
         if not row:
@@ -2634,6 +2809,7 @@ def generate_hypotheses(
                 relevance_debug=cand.relevance_debug,
                 trust_friction=trust_friction,
                 input_fingerprint=input_fingerprint,
+                provider=provider,
                 model=model,
             )
         if not row:
@@ -2668,6 +2844,7 @@ def generate_hypotheses(
         _persist_snapshot(
             assessment_id=assessment_id,
             input_fingerprint=input_fingerprint,
+            provider=provider,
             model=model,
         )
     except Exception:

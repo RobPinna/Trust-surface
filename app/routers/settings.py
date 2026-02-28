@@ -84,10 +84,21 @@ async def save_llm_route(
     user=Depends(get_current_user),
 ):
     form = await request.form()
+    provider = str(form.get("llm_provider", "openai")).strip().lower()
     model = str(form.get("llm_model", "gpt-4.1")).strip()
-    api_key = str(form.get("llm_api_key", ""))
-    clear_api_key = str(form.get("clear_llm_api_key", "off")) == "on"
-    save_llm_setting(db, model=model, api_key=api_key, clear_api_key=clear_api_key)
+    openai_api_key = str(form.get("openai_api_key", ""))
+    anthropic_api_key = str(form.get("anthropic_api_key", ""))
+    clear_openai_api_key = str(form.get("clear_openai_api_key", "off")) == "on"
+    clear_anthropic_api_key = str(form.get("clear_anthropic_api_key", "off")) == "on"
+    save_llm_setting(
+        db,
+        provider=provider,
+        model=model,
+        openai_api_key=openai_api_key,
+        anthropic_api_key=anthropic_api_key,
+        clear_openai_api_key=clear_openai_api_key,
+        clear_anthropic_api_key=clear_anthropic_api_key,
+    )
     return RedirectResponse(url="/settings?test_result=LLM+settings+saved", status_code=302)
 
 
