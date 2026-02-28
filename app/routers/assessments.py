@@ -1,5 +1,3 @@
-from collections import defaultdict
-
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from pathlib import Path
@@ -44,6 +42,7 @@ from app.services.assessment_service import (
 from app.services.progress_tracker import fail_progress, finish_progress, get_progress, start_progress, update_progress
 from app.utils.jsonx import from_json
 from app.services.risk_brief_service import BriefInput, get_or_generate_brief
+from app.services.risk_story import get_ranked_risks
 from src.rag.index import build_index as build_rag_index
 from src.rag.index import debug_query_plan as rag_debug_query_plan
 from src.rag.index import run_query_plan as run_rag_query_plan
@@ -69,15 +68,44 @@ def _assessment_display_name(company_name: str, domain: str) -> str:
     return domain_clean or "Unnamed target"
 
 
-def _status_factor(status: str) -> float:
-    key = str(status or "").strip().upper()
-    if key == "ELEVATED":
-        return 1.0
-    if key == "WATCHLIST":
-        return 0.55
-    if key == "BASELINE":
-        return 0.25
-    return 0.4
+def _risk_posture_score(row: dict) -> int:
+    status = str(row.get("status", "WATCHLIST")).strip().upper()
+    impact_band = str(row.get("impact_band", "MED")).strip().upper()
+    plausibility = int(row.get("plausibility_score", 0) or 0)
+    confidence = int(row.get("confidence", 0) or 0)
+    impact_score = {"HIGH": 3, "MED": 2, "LOW": 1}
+    impact_norm = int(round((impact_score.get(impact_band, 2) / 3.0) * 100))
+
+    base = (0.45 * impact_norm) + (0.35 * plausibility) + (0.20 * confidence)
+    status_factor = 1.0
+    if status == "WATCHLIST":
+        status_factor = 0.7
+    elif status == "BASELINE":
+        status_factor = 0.35
+    return int(max(0, min(100, round(base * status_factor))))
+
+
+def _overall_risk_score(rows: list[dict]) -> int:
+    if not rows:
+        return 0
+    valid_rows = [r for r in rows if isinstance(r, dict)]
+    if not valid_rows:
+        return 0
+    status_weight = {"ELEVATED": 1.0, "WATCHLIST": 0.6, "BASELINE": 0.3}
+    impact_weight = {"HIGH": 1.25, "MED": 1.0, "LOW": 0.75}
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for row in valid_rows:
+        score = float(_risk_posture_score(row))
+        status = str(row.get("status", "WATCHLIST")).strip().upper()
+        impact_band = str(row.get("impact_band", "MED")).strip().upper()
+        w = float(status_weight.get(status, 0.6)) * float(impact_weight.get(impact_band, 1.0))
+        w = max(0.1, w)
+        weighted_sum += score * w
+        weight_total += w
+    if weight_total <= 0:
+        return 0
+    return int(max(0, min(100, round(weighted_sum / weight_total))))
 
 
 def _assessment_context(assessment: Assessment) -> dict:
@@ -321,36 +349,20 @@ def assessments_list(
         stmt = stmt.where(Assessment.company_name.ilike(like) | Assessment.domain.ilike(like))
 
     rows = db.execute(stmt).scalars().all()
-    assessment_ids = [int(a.id) for a in rows]
-    score_candidates: dict[int, list[float]] = defaultdict(list)
-    status_counts: dict[int, dict[str, int]] = defaultdict(lambda: {"ELEVATED": 0, "WATCHLIST": 0, "BASELINE": 0})
-    if assessment_ids:
-        score_rows = db.execute(
-            select(
-                Hypothesis.assessment_id,
-                Hypothesis.status,
-                Hypothesis.potential_impact_score,
-                Hypothesis.plausibility_score,
-                Hypothesis.confidence,
-            ).where(Hypothesis.assessment_id.in_(assessment_ids))
-        ).all()
-        for assessment_id, status, potential_impact, plausibility, confidence in score_rows:
-            aid = int(assessment_id or 0)
-            st = str(status or "").strip().upper()
-            if st not in status_counts[aid]:
-                st = "WATCHLIST"
-            status_counts[aid][st] = int(status_counts[aid].get(st, 0) or 0) + 1
-            impact_score = max(0, min(100, int(potential_impact or 0)))
-            plausibility_score = max(0, min(100, int(plausibility or 0)))
-            confidence_score = max(0, min(100, int(confidence or 0)))
-            base_score = (0.45 * impact_score) + (0.35 * plausibility_score) + (0.20 * confidence_score)
-            score_candidates[aid].append(base_score * _status_factor(st))
-
     assessment_metrics: dict[int, dict[str, int]] = {}
-    for aid in assessment_ids:
-        candidates = sorted(score_candidates.get(aid, []), reverse=True)[:5]
-        total_score = int(round(sum(candidates) / len(candidates))) if candidates else 0
-        counts = status_counts.get(aid, {"ELEVATED": 0, "WATCHLIST": 0, "BASELINE": 0})
+    for a in rows:
+        aid = int(a.id)
+        ranked = get_ranked_risks(
+            db,
+            a,
+            include_baseline=False,
+            risk_type="",
+            impact="",
+            q="",
+        )
+        all_ranked_rows = list(ranked.get("all_ranked") or [])
+        total_score = int(_overall_risk_score(all_ranked_rows))
+        counts = dict(ranked.get("status_counts") or {"ELEVATED": 0, "WATCHLIST": 0, "BASELINE": 0})
         assessment_metrics[aid] = {
             "total_score": int(max(0, min(100, total_score))),
             "elevated": int(counts.get("ELEVATED", 0) or 0),
