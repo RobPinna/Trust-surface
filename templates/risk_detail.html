@@ -84,22 +84,31 @@
           <p class="section-subtitle">Signals that combine into a decision-ready risk outcome.</p>
         </div>
       </div>
-      <div class="mt-5 flex flex-wrap items-center gap-3">
-        {% for b in vm.recipe_bundles %}
-        <button type="button" class="recipe-block" @click="openEvidence({{ ('bundle:' ~ b.id) | tojson }}, {{ b.title | tojson }})">
-          <span class="recipe-icon"><i data-lucide="{{ b.icon }}"></i></span>
-          <span class="recipe-text">
-            <span class="recipe-title">{{ b.title }}</span>
-            <span class="recipe-meta">{{ b.item_count }} items</span>
-          </span>
-        </button>
-        {% if not loop.last %}
-        <span class="recipe-plus">+</span>
-        {% endif %}
-        {% endfor %}
-        <span class="recipe-arrow">-&gt;</span>
-        <div class="recipe-outcome">
-          <span class="recipe-title">{{ vm.risk.primary_risk_type if vm.risk.primary_risk_type else vm.risk.title }}</span>
+      <div class="mt-5 risk-recipe-flow">
+        <div class="risk-recipe-row">
+          {% for b in vm.recipe_bundles %}
+          <button
+            type="button"
+            class="recipe-block"
+            @click="openEvidence({{ ('bundle:' ~ b.id) | tojson }}, {{ b.title | tojson }})"
+            {% if b.hover_tooltip %}data-tooltip="{{ b.hover_tooltip }}" data-tooltip-rich="1" data-tooltip-near="1"{% endif %}
+          >
+            <span class="recipe-text">
+              <span class="recipe-title">{{ b.title }}</span>
+              <span class="recipe-meta">{{ b.item_count }} items</span>
+            </span>
+          </button>
+          {% if not loop.last %}
+          <span class="recipe-plus">+</span>
+          {% endif %}
+          {% endfor %}
+        </div>
+        <div class="risk-recipe-divider" aria-hidden="true"></div>
+        <div class="risk-recipe-outcome-wrap">
+          <span class="recipe-arrow recipe-arrow-down" aria-hidden="true">&darr;</span>
+          <div class="recipe-outcome">
+            <span class="recipe-title">{{ vm.risk.primary_risk_type if vm.risk.primary_risk_type else vm.risk.title }}</span>
+          </div>
         </div>
       </div>
     </section>

@@ -1293,6 +1293,70 @@ i[data-lucide],
   padding: 0.56rem 0.92rem;
 }
 
+.risk-recipe-row {
+  display: flex;
+  flex-wrap: nowrap !important;
+  align-items: center;
+  justify-content: center;
+  gap: 0.72rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0.2rem;
+  scrollbar-width: thin;
+}
+
+.risk-recipe-flow {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.risk-recipe-row .recipe-block,
+.risk-recipe-row .recipe-plus,
+.risk-recipe-row .recipe-outcome {
+  flex: 0 0 auto;
+}
+
+.risk-recipe-row .recipe-block {
+  min-width: 180px;
+  max-width: 260px;
+  font-weight: 400;
+}
+
+.risk-recipe-row .recipe-text {
+  min-width: 0;
+}
+
+.risk-recipe-row .recipe-title,
+.risk-recipe-row .recipe-meta {
+  font-weight: 400;
+}
+
+.risk-recipe-row .recipe-plus {
+  font-weight: 500;
+}
+
+.risk-recipe-divider {
+  width: 100%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent 0%, var(--color-line-strong) 15%, var(--color-line-strong) 85%, transparent 100%);
+}
+
+.risk-recipe-outcome-wrap {
+  display: grid;
+  justify-items: center;
+  gap: 0.35rem;
+}
+
+.recipe-arrow-down {
+  font-size: 1rem;
+  line-height: 1;
+  color: #9aa7cd;
+}
+
+.risk-recipe-outcome-wrap .recipe-title {
+  font-weight: 700;
+}
+
 .story-col-title {
   margin: 0 0 0.58rem;
   color: #9fa8c8;
@@ -2401,17 +2465,34 @@ i[data-lucide],
 }
 
 .ui-tooltip {
-  position: absolute;
+  position: fixed;
   z-index: 9999;
   max-width: 360px;
-  border: 1px solid var(--color-line-strong);
-  border-radius: var(--radius-xs);
-  background: rgba(12, 14, 22, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.045);
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.032), rgba(255, 255, 255, 0.007)),
+    linear-gradient(180deg, rgba(12, 14, 22, 0.80), rgba(9, 10, 16, 0.80));
   color: #eef3ff;
-  padding: 0.46rem 0.56rem;
+  padding: 0.6rem 0.7rem;
   font-size: 0.74rem;
   line-height: 1.35;
-  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.34);
+  box-shadow: var(--shadow-card);
+  pointer-events: none;
+}
+
+.ui-tooltip.is-rich {
+  max-width: 440px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.ui-tooltip-line {
+  line-height: 1.36;
+}
+
+.ui-tooltip-line + .ui-tooltip-line {
+  margin-top: 0.28rem;
 }
 
 .ui-tooltip.hidden {

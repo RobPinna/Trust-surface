@@ -5605,31 +5605,67 @@ def build_risk_detail_viewmodel(
     }
 
     story_signals = []
-    used_signal_ref_keys: set[str] = set()
     for b in (recipe_bundles or [])[:6]:
         bundle_set_id = f"bundle:{b.get('id')}"
         bundle_evidence = list(evidence_sets.get(bundle_set_id, []) or [])
-        refs_for_bundle_raw = _refs_for_bundle(
-            b,
-            coded_signal_refs,
-            bundle_evidence=bundle_evidence,
-            evidence_code_map=evidence_code_map,
-            artifact_code_map=artifact_code_map,
-            max_items=10,
-        )
+        bundle_items_limit = max(1, min(10, int(b.get("item_count", 0) or len(bundle_evidence) or 4)))
+
         refs_for_bundle: list[dict[str, str]] = []
-        for ref in refs_for_bundle_raw:
-            text = " ".join(str(ref.get("text", "")).split()).strip()
-            code = " ".join(str(ref.get("code", "")).split()).strip()
-            if not text:
-                continue
-            key = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()[:180]
-            if not key or key in used_signal_ref_keys:
-                continue
-            used_signal_ref_keys.add(key)
-            refs_for_bundle.append({"code": code, "text": text})
-            if len(refs_for_bundle) >= 10:
+        for ev in bundle_evidence:
+            if len(refs_for_bundle) >= bundle_items_limit:
                 break
+            row_refs = _build_coded_signal_refs(
+                [ev],
+                evidence_code_map=evidence_code_map,
+                artifact_code_map=artifact_code_map,
+                max_items=1,
+            )
+            picked_ref: dict[str, str] | None = None
+            if row_refs:
+                code = " ".join(str((row_refs[0] or {}).get("code", "")).split()).strip().upper()
+                text = " ".join(str((row_refs[0] or {}).get("text", "")).split()).strip()
+                if re.match(r"^E-\d{2,3}$", code) and text:
+                    picked_ref = {"code": code, "text": text}
+            if picked_ref is None:
+                row_code = ""
+                if isinstance(evidence_code_map, dict):
+                    row_code = " ".join(str(evidence_code_map.get(_evidence_identity_key(ev), "")).split()).strip().upper()
+                indicator_hints = ev.get("indicator_hints")
+                row_text = ""
+                if isinstance(indicator_hints, list):
+                    for hint in indicator_hints:
+                        clean_hint = " ".join(str(hint or "").split()).strip()
+                        if clean_hint:
+                            row_text = clean_hint
+                            break
+                if not row_text:
+                    row_text = _signal_excerpt(ev) or _first_sentence(str(ev.get("snippet", "") or ""), max_chars=140)
+                if re.match(r"^E-\d{2,3}$", row_code) and row_text:
+                    picked_ref = {"code": row_code, "text": row_text}
+            if picked_ref is not None:
+                refs_for_bundle.append(picked_ref)
+
+        if not refs_for_bundle:
+            refs_fallback_raw = _build_coded_signal_refs(
+                list(bundle_evidence or []),
+                evidence_code_map=evidence_code_map,
+                artifact_code_map=artifact_code_map,
+                max_items=bundle_items_limit,
+            )
+            for ref in refs_fallback_raw:
+                code = " ".join(str(ref.get("code", "")).split()).strip().upper()
+                text = " ".join(str(ref.get("text", "")).split()).strip()
+                if not text or not re.match(r"^E-\d{2,3}$", code):
+                    continue
+                refs_for_bundle.append({"code": code, "text": text})
+                if len(refs_for_bundle) >= bundle_items_limit:
+                    break
+
+        refs_limited = list(refs_for_bundle[:bundle_items_limit])
+        b["evidence_refs"] = refs_limited
+        b["hover_tooltip"] = "\n".join(
+            [f"{str(ref.get('code', '')).strip()} {str(ref.get('text', '')).strip()}".strip() for ref in refs_limited]
+        )
         story_signals.append(
             {
                 "id": f"sig:{b.get('id')}",
@@ -5637,7 +5673,7 @@ def build_risk_detail_viewmodel(
                 "detail": f"{int(b.get('item_count', 0) or 0)} items",
                 "icon": str(b.get("icon", "sparkles")),
                 "evidence_set_id": bundle_set_id,
-                "evidence_refs": refs_for_bundle,
+                "evidence_refs": refs_limited,
             }
         )
     story_abuse_path = []

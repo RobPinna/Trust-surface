@@ -18,31 +18,107 @@ function initTooltips() {
 
   function hide() {
     tip.classList.add('hidden');
+    tip.classList.remove('is-rich');
     activeEl = null;
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function renderRichTooltip(text) {
+    const lines = String(text || '')
+      .replace(/\r\n/g, '\n')
+      .split('\n')
+      .map((line) => String(line || '').trim())
+      .filter(Boolean);
+    if (!lines.length) {
+      tip.textContent = '';
+      return;
+    }
+    const html = lines.map((line) => {
+      const safeLine = escapeHtml(line);
+      if (/^E-\d{2,3}\s+/i.test(line)) {
+        return `<div class="ui-tooltip-line"><span class="wws-signal-text">${safeLine}</span></div>`;
+      }
+      return `<div class="ui-tooltip-line">${safeLine}</div>`;
+    });
+    tip.innerHTML = html.join('');
   }
 
   function show(el) {
     const text = String(el.getAttribute('data-tooltip') || '').trim();
     if (!text) return;
+    const rich = String(el.getAttribute('data-tooltip-rich') || '').trim() === '1';
+    const near = String(el.getAttribute('data-tooltip-near') || '').trim() === '1';
     activeEl = el;
-    tip.textContent = text;
+    tip.classList.toggle('is-rich', rich);
+    if (rich) renderRichTooltip(text);
+    else tip.textContent = text;
     tip.classList.remove('hidden');
 
     const rect = el.getBoundingClientRect();
     const pad = 10;
-    const maxW = Math.min(360, window.innerWidth - (pad * 2));
+    const maxW = Math.min((rich ? 440 : 360), window.innerWidth - (pad * 2));
     tip.style.maxWidth = `${maxW}px`;
+    if (!rich) tip.style.maxHeight = '';
+    else tip.style.maxHeight = '300px';
 
-    // Position above, fallback below
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    // Default: above then below. For near tooltips: force non-overlapping placement.
     const tipRect = tip.getBoundingClientRect();
-    let top = rect.top - tipRect.height - 10;
-    let left = rect.left + (rect.width / 2) - (tipRect.width / 2);
-    if (top < pad) top = rect.bottom + 10;
-    if (left < pad) left = pad;
-    if (left + tipRect.width > window.innerWidth - pad) left = window.innerWidth - pad - tipRect.width;
+    const gap = near ? 4 : 10;
+    const viewportTop = pad;
+    const viewportBottom = window.innerHeight - pad;
+    const viewportLeft = pad;
+    const viewportRight = window.innerWidth - pad;
 
-    tip.style.top = `${Math.round(top + window.scrollY)}px`;
-    tip.style.left = `${Math.round(left + window.scrollX)}px`;
+    const centeredLeft = clamp(
+      rect.left + (rect.width / 2) - (tipRect.width / 2),
+      viewportLeft,
+      Math.max(viewportLeft, viewportRight - tipRect.width)
+    );
+
+    let top = rect.top - tipRect.height - gap;
+    let left = centeredLeft;
+
+    if (near) {
+      const availableAbove = Math.max(0, Math.floor(rect.top - viewportTop - gap));
+      const availableBelow = Math.max(0, Math.floor(viewportBottom - rect.bottom - gap));
+      let place = 'above';
+      if (availableAbove < 96 && availableBelow > availableAbove) place = 'below';
+      if (availableBelow < 96 && availableAbove >= availableBelow) place = 'above';
+
+      if (rich) {
+        const availableSpace = place === 'above' ? availableAbove : availableBelow;
+        const boundedMax = Math.max(96, Math.min(300, availableSpace));
+        tip.style.maxHeight = `${boundedMax}px`;
+        // Re-measure after max-height change to keep tooltip close to the target.
+        const resizedRect = tip.getBoundingClientRect();
+        if (place === 'above') top = rect.top - resizedRect.height - gap;
+        else top = rect.bottom + gap;
+      } else {
+        if (place === 'above') top = rect.top - tipRect.height - gap;
+        else top = rect.bottom + gap;
+      }
+      top = clamp(top, viewportTop, Math.max(viewportTop, viewportBottom - tip.getBoundingClientRect().height));
+      left = centeredLeft;
+    } else {
+      if (top < viewportTop) top = rect.bottom + gap;
+      top = clamp(top, viewportTop, Math.max(viewportTop, viewportBottom - tipRect.height));
+      left = centeredLeft;
+    }
+
+    tip.style.top = `${Math.round(top)}px`;
+    tip.style.left = `${Math.round(left)}px`;
   }
 
   document.addEventListener('mouseover', (e) => {
