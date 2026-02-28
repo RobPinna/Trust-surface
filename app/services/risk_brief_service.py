@@ -650,7 +650,12 @@ def _call_llm(*, api_key: str, model: str, inp: BriefInput, retry_hint: str = ""
         return None
 
 
-def get_or_generate_brief(db: Session, inp: BriefInput) -> str:
+def get_or_generate_brief(
+    db: Session,
+    inp: BriefInput,
+    *,
+    generate_if_missing: bool = True,
+) -> str:
     evidence = inp.evidence or []
     avg_conf = _avg_conf(evidence)
     if len(evidence) < 2 or avg_conf < 45:
@@ -677,6 +682,8 @@ def get_or_generate_brief(db: Session, inp: BriefInput) -> str:
     )
     if existing and (existing.brief or "").strip():
         return existing.brief
+    if not bool(generate_if_missing):
+        return ""
 
     llm_cfg = get_llm_runtime_config(db)
     model = str(llm_cfg.get("model") or "LOCAL").strip()
@@ -1330,6 +1337,7 @@ def get_or_generate_llm_hypothesis(
     evidence_strength: str,
     confidence: int,
     evidence: list[dict[str, Any]],
+    generate_if_missing: bool = True,
 ) -> dict[str, Any]:
     evidence_norm = _normalize_llm_hypothesis_evidence(evidence, max_items=48)
     if len(evidence_norm) < 2:
@@ -1372,6 +1380,15 @@ def get_or_generate_llm_hypothesis(
         cached = _parse_llm_hypothesis_blob(str(existing.brief or ""))
         if cached:
             return cached
+    if not bool(generate_if_missing):
+        return {
+            "items": [],
+            "summary": "",
+            "rationale": "",
+            "uncertainty": "",
+            "mode": "LOCAL",
+            "shadow_note": "Experimental output in shadow mode. It does not modify current score or status.",
+        }
 
     llm_cfg = get_llm_runtime_config(db)
     model = str(llm_cfg.get("model") or "LOCAL").strip()
@@ -2078,12 +2095,15 @@ def get_or_generate_llm_risk_sections(
     contradictions: list[str] | None,
     base_timeline: list[dict[str, str]] | None,
     evidence: list[dict[str, Any]],
+    generate_if_missing: bool = True,
 ) -> dict[str, Any]:
     evidence_norm = _normalize_llm_hypothesis_evidence(evidence, max_items=48)
     contradiction_rows = [str(x).strip() for x in (contradictions or []) if str(x).strip()][:5]
     timeline_rows = _normalize_abuse_path_steps(base_timeline, max_items=6)
     safe_why = _safe_section_line(str(why_it_matters or ""), max_chars=320)
     if len(evidence_norm) < 2:
+        if not bool(generate_if_missing):
+            return {}
         return _local_llm_sections_payload(
             why_it_matters=safe_why,
             primary_risk_type=primary_risk_type,
@@ -2128,6 +2148,8 @@ def get_or_generate_llm_risk_sections(
         cached = _parse_llm_sections_blob(str(existing.brief or ""))
         if cached:
             return cached
+    if not bool(generate_if_missing):
+        return {}
 
     llm_cfg = get_llm_runtime_config(db)
     model = str(llm_cfg.get("model") or "LOCAL").strip()

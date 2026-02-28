@@ -82,7 +82,7 @@ def list_risks(
                     db,
                     assessment,
                     rid,
-                    allow_generated_text=True,
+                    allow_generated_text=False,
                     ranked_snapshot=ranked_snapshot,
                 )
             except Exception:
@@ -192,7 +192,7 @@ def risk_detail(
     if not assessment:
         return RedirectResponse(url="/assessments", status_code=302)
 
-    vm = build_risk_detail_viewmodel(db, assessment, int(risk_id))
+    vm = build_risk_detail_viewmodel(db, assessment, int(risk_id), allow_generated_text=False)
     if not vm.get("risk"):
         return RedirectResponse(url=f"/assessments/{assessment_id}/risks", status_code=302)
 

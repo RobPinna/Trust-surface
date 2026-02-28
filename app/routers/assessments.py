@@ -1048,6 +1048,19 @@ def wizard_step5(
             import logging
 
             logging.getLogger(__name__).exception("Trust workflow map generation failed for assessment %s", assessment.id)
+        from app.services.risk_story import precompute_risk_texts_for_assessment
+
+        update_progress(assessment.id, "assess", "Precomputing risk narratives...")
+        precompute_stats = precompute_risk_texts_for_assessment(
+            db,
+            assessment,
+            include_baseline=True,
+        )
+        update_progress(
+            assessment.id,
+            "assess",
+            f"Risk narratives ready ({int(precompute_stats.get('warmed', 0))}/{int(precompute_stats.get('total', 0))}).",
+        )
         update_progress(assessment.id, "assess", "Generating mitigations...")
         build_mitigations(db, assessment)
         finish_progress(assessment.id, "assess", "Risk assessment complete.")

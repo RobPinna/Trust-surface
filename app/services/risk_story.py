@@ -3964,7 +3964,7 @@ def build_overview_viewmodel(
                 db,
                 assessment,
                 rid,
-                allow_generated_text=True,
+                allow_generated_text=False,
                 ranked_snapshot=ranked,
             )
         except Exception:
@@ -4745,6 +4745,58 @@ def build_overview_viewmodel(
     }
 
 
+def precompute_risk_texts_for_assessment(
+    db: Session,
+    assessment: Assessment,
+    *,
+    include_baseline: bool = True,
+) -> dict[str, int]:
+    """
+    Precompute risk narrative text/cache during wizard execution.
+    This avoids first-open generation cost on overview/risk pages.
+    """
+    ranked = get_ranked_risks(
+        db,
+        assessment,
+        include_baseline=bool(include_baseline),
+        risk_type="",
+        impact="",
+        q="",
+    )
+    rows = [r for r in list(ranked.get("all_unfiltered") or []) if isinstance(r, dict)]
+    total = len(rows)
+    warmed = 0
+    failed = 0
+    for row in rows:
+        rid = int(row.get("id", 0) or 0)
+        if rid <= 0:
+            continue
+        try:
+            vm = build_risk_detail_viewmodel(
+                db,
+                assessment,
+                rid,
+                allow_generated_text=True,
+                ranked_snapshot=ranked,
+            )
+            if isinstance(vm, dict) and isinstance(vm.get("risk"), dict):
+                warmed += 1
+            else:
+                failed += 1
+        except Exception:
+            logger.exception(
+                "Risk text precompute failed for assessment %s risk %s",
+                int(assessment.id),
+                int(rid),
+            )
+            failed += 1
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    return {"total": int(total), "warmed": int(warmed), "failed": int(failed)}
+
+
 def build_risk_detail_viewmodel(
     db: Session,
     assessment: Assessment,
@@ -5077,48 +5129,51 @@ def build_risk_detail_viewmodel(
 
     # Risk brief (LLM optional, defensive-only; cached in DB).
     exec_brief = ""
-    if allow_generated_text:
+    try:
+        conditions = [str(b.get("title", "")).strip() for b in recipe_bundles if str(b.get("title", "")).strip()][:3]
+        brief_inp = BriefInput(
+            assessment_id=assessment_id,
+            risk_kind="scenario",
+            risk_id=int(rid),
+            title=str(row_title or title),
+            risk_type=row_risk_type,
+            primary_risk_type=primary_risk_type,
+            risk_vector_summary=risk_vector_summary,
+            conditions=conditions,
+            signal_bundles=[
+                {"title": str(b.get("title", "")), "item_count": int(b.get("item_count", 0) or 0)}
+                for b in (bundles or [])[:8]
+            ],
+            workflow_nodes=[
+                {
+                    "title": str(n.title or ""),
+                    "channel": str(n.channel_type or ""),
+                    "sensitivity": str(n.sensitivity_level or ""),
+                    "trust_friction": int(n.trust_friction_score or 0),
+                }
+                for n in linked_workflows[:6]
+            ],
+            vendor_cues=_vendor_cues_from_evidence(list(evidence_sets.get(f"risk:{rid}", []))),
+            channel_cues=_channel_cues_from_evidence(list(evidence_sets.get(f"risk:{rid}", []))),
+            impact_targets=_impact_targets_from_band(str(impact_band), row_risk_type),
+            severity=int(row_severity or 3),
+            likelihood_badge=str(likelihood).upper(),
+            confidence=int(conf),
+            evidence=list(evidence_sets.get(f"risk:{rid}", [])),
+            correlation_hint="",
+        )
+        exec_brief = get_or_generate_brief(
+            db,
+            brief_inp,
+            generate_if_missing=bool(allow_generated_text),
+        )
+    except Exception:
+        logger.exception("Failed to generate risk brief for assessment %s risk %s", assessment_id, rid)
         try:
-            conditions = [str(b.get("title", "")).strip() for b in recipe_bundles if str(b.get("title", "")).strip()][:3]
-            brief_inp = BriefInput(
-                assessment_id=assessment_id,
-                risk_kind="scenario",
-                risk_id=int(rid),
-                title=str(row_title or title),
-                risk_type=row_risk_type,
-                primary_risk_type=primary_risk_type,
-                risk_vector_summary=risk_vector_summary,
-                conditions=conditions,
-                signal_bundles=[
-                    {"title": str(b.get("title", "")), "item_count": int(b.get("item_count", 0) or 0)}
-                    for b in (bundles or [])[:8]
-                ],
-                workflow_nodes=[
-                    {
-                        "title": str(n.title or ""),
-                        "channel": str(n.channel_type or ""),
-                        "sensitivity": str(n.sensitivity_level or ""),
-                        "trust_friction": int(n.trust_friction_score or 0),
-                    }
-                    for n in linked_workflows[:6]
-                ],
-                vendor_cues=_vendor_cues_from_evidence(list(evidence_sets.get(f"risk:{rid}", []))),
-                channel_cues=_channel_cues_from_evidence(list(evidence_sets.get(f"risk:{rid}", []))),
-                impact_targets=_impact_targets_from_band(str(impact_band), row_risk_type),
-                severity=int(row_severity or 3),
-                likelihood_badge=str(likelihood).upper(),
-                confidence=int(conf),
-                evidence=list(evidence_sets.get(f"risk:{rid}", [])),
-                correlation_hint="",
-            )
-            exec_brief = get_or_generate_brief(db, brief_inp)
+            db.rollback()
         except Exception:
-            logger.exception("Failed to generate risk brief for assessment %s risk %s", assessment_id, rid)
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            exec_brief = ""
+            pass
+        exec_brief = ""
 
     risk = {
         "id": rid,
@@ -5195,51 +5250,52 @@ def build_risk_detail_viewmodel(
         "shadow_note": "Experimental output in shadow mode. It does not modify current score or status.",
     }
     llm_sections: dict[str, Any] = {}
-    if allow_generated_text:
+    try:
+        llm_hypothesis = get_or_generate_llm_hypothesis(
+            db,
+            assessment_id=int(assessment_id),
+            risk_id=int(rid),
+            primary_risk_type=str(primary_risk_type or ""),
+            risk_type=row_risk_type,
+            likelihood=str(likelihood).upper(),
+            impact_band=str(impact_band).upper(),
+            evidence_strength=str(evidence_strength).upper(),
+            confidence=int(conf),
+            evidence=list(risk_evidence_pool or []),
+            generate_if_missing=bool(allow_generated_text),
+        )
+    except Exception:
+        logger.exception("Failed to build LLM shadow hypotheses for assessment %s risk %s", assessment_id, rid)
         try:
-            llm_hypothesis = get_or_generate_llm_hypothesis(
-                db,
-                assessment_id=int(assessment_id),
-                risk_id=int(rid),
-                primary_risk_type=str(primary_risk_type or ""),
-                risk_type=row_risk_type,
-                likelihood=str(likelihood).upper(),
-                impact_band=str(impact_band).upper(),
-                evidence_strength=str(evidence_strength).upper(),
-                confidence=int(conf),
-                evidence=list(risk_evidence_pool or []),
-            )
+            db.rollback()
         except Exception:
-            logger.exception("Failed to build LLM shadow hypotheses for assessment %s risk %s", assessment_id, rid)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+            pass
+    try:
+        llm_why_seed = " ".join(str(llm_hypothesis.get("summary", "")).split()).strip()
+        if not llm_why_seed:
+            llm_why_seed = " ".join(str((llm_hypothesis.get("items") or [""])[0]).split()).strip()
+        llm_sections = get_or_generate_llm_risk_sections(
+            db,
+            assessment_id=int(assessment_id),
+            risk_id=int(rid),
+            primary_risk_type=str(primary_risk_type or ""),
+            risk_type=row_risk_type,
+            likelihood=str(likelihood).upper(),
+            impact_band=str(impact_band).upper(),
+            evidence_strength=str(evidence_strength).upper(),
+            confidence=int(conf),
+            why_it_matters=llm_why_seed,
+            contradictions=list(contradictions or []),
+            base_timeline=list(abuse_path_steps_for_how or []),
+            evidence=list(risk_evidence_pool or []),
+            generate_if_missing=bool(allow_generated_text),
+        )
+    except Exception:
+        logger.exception("Failed to build LLM risk sections for assessment %s risk %s", assessment_id, rid)
         try:
-            llm_why_seed = " ".join(str(llm_hypothesis.get("summary", "")).split()).strip()
-            if not llm_why_seed:
-                llm_why_seed = " ".join(str((llm_hypothesis.get("items") or [""])[0]).split()).strip()
-            llm_sections = get_or_generate_llm_risk_sections(
-                db,
-                assessment_id=int(assessment_id),
-                risk_id=int(rid),
-                primary_risk_type=str(primary_risk_type or ""),
-                risk_type=row_risk_type,
-                likelihood=str(likelihood).upper(),
-                impact_band=str(impact_band).upper(),
-                evidence_strength=str(evidence_strength).upper(),
-                confidence=int(conf),
-                why_it_matters=llm_why_seed,
-                contradictions=list(contradictions or []),
-                base_timeline=list(abuse_path_steps_for_how or []),
-                evidence=list(risk_evidence_pool or []),
-            )
+            db.rollback()
         except Exception:
-            logger.exception("Failed to build LLM risk sections for assessment %s risk %s", assessment_id, rid)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+            pass
 
     llm_why = " ".join(str(llm_hypothesis.get("summary", "")).split()).strip()
     if not llm_why:
