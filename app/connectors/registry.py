@@ -11,7 +11,7 @@ from app.connectors.procurement_documents import ProcurementDocumentsConnector
 from app.connectors.public_role_extractor import PublicRoleExtractorConnector
 from app.connectors.public_docs_pdf import PublicDocsPdfConnector
 from app.connectors.shodan import ShodanConnector
-from app.connectors.social_mock import SocialMockConnector
+from app.connectors.social_twitter import SocialTwitterConnector
 from app.connectors.subdomain_discovery import SubdomainDiscoveryConnector
 from app.connectors.vendor_js_detection import VendorJsDetectionConnector
 from app.connectors.virustotal import VirusTotalConnector
@@ -29,7 +29,7 @@ def connector_registry() -> list[ConnectorBase]:
         BrandImpersonationMonitorConnector(),
         GDELTNewsConnector(),
         MediaTrendConnector(),
-        SocialMockConnector(),
+        SocialTwitterConnector(),
         JobPostingsLiveConnector(),
         VendorJsDetectionConnector(),
         ProcurementDocumentsConnector(),
