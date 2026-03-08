@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "operational-leverage-framework"
+name = "trust-surface"
 version = "0.1.0"
-description = "Evidence-first exposure assessment framework for CTI and cyber risk communication."
+description = "Evidence-first CTI framework for trust-surface mapping and social-engineering risk assessment."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -33,7 +33,7 @@ dev = [
 ]
 
 [project.scripts]
-olf-score = "operational_leverage_framework.cli.main:main"
+trust-surface = "operational_leverage_framework.cli.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/operational_leverage_framework", "src/rag", "src/reasoner", "app", "config"]

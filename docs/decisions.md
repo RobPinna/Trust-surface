@@ -6,7 +6,7 @@
 - Tradeoff: full package migration is incremental rather than immediate.
 
 ## Decision 2: Add typed public package for reusable scoring
-- Choice: introduce `src/operational_leverage_framework` with explicit `core/io/models/cli`.
+- Choice: introduce `src/operational_leverage_framework` (internal package name) with explicit `core/io/models/cli`.
 - Why: provide a clean public API boundary for portfolio usage and offline demos.
 - Tradeoff: temporary dual-path imports (`app/services` and package wrappers).
 

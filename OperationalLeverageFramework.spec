@@ -37,7 +37,7 @@ exe = EXE(
     a.scripts,
     [],
     [],
-    name="OperationalLeverageFramework",
+    name="TrustSurface",
     exclude_binaries=True,
     debug=False,
     bootloader_ignore_signals=False,
@@ -60,5 +60,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="OperationalLeverageFramework",
+    name="TrustSurface",
 )

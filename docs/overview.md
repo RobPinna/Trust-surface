@@ -1,4 +1,4 @@
-# Operational Leverage Framework Overview
+# Trust Surface — Overview
 
 ## Purpose
 This project models public exposure signals and turns them into structured, evidence-first risk narratives for defensive decision support.
@@ -16,7 +16,7 @@ flowchart LR
   APP --> SCORE[signal_model + evidence_quality_classifier]
   SCORE --> RISKS[risk_story / risk briefs]
   APP --> EXPORT[PDF + JSON export]
-  CLI[olf-score CLI] --> SCORE
+  CLI[trust-surface CLI] --> SCORE
 ```
 
 ## Main outputs

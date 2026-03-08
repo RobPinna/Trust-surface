@@ -10,7 +10,7 @@ from ..io import dump_result_file, load_evidence_file
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="olf-score",
+        prog="trust-surface",
         description="Compute deterministic evidence-first confidence for a small evidence dataset.",
     )
     parser.add_argument("input", help="JSON file containing a list of evidence objects")

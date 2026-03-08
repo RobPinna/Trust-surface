@@ -5,7 +5,7 @@ Input: `examples/scenario_hospitality/input.json`
 
 Run:
 ```bash
-py -3 -m operational_leverage_framework.cli.main examples/scenario_hospitality/input.json --out examples/output/hospitality.json --risk-type impersonation
+trust-surface examples/scenario_hospitality/input.json --out examples/output/hospitality.json --risk-type impersonation
 ```
 
 Expected output snippet (from local run):
@@ -18,7 +18,7 @@ Input: `examples/scenario_boilerplate/input.json`
 
 Run:
 ```bash
-py -3 -m operational_leverage_framework.cli.main examples/scenario_boilerplate/input.json --out examples/output/boilerplate.json --risk-type impersonation
+trust-surface examples/scenario_boilerplate/input.json --out examples/output/boilerplate.json --risk-type impersonation
 ```
 
 Expected output snippet (from local run):

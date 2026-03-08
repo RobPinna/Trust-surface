@@ -352,7 +352,7 @@ def cmd_safety(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Cross-platform task runner for Operational Leverage Framework.")
+    parser = argparse.ArgumentParser(description="Cross-platform task runner for Trust Surface.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     setup_parser = sub.add_parser("setup", help="Install project dependencies.")

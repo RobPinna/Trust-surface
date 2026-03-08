@@ -49,10 +49,10 @@ def _default_runtime_dir() -> Path:
         candidates: list[Path] = []
         local_appdata = os.getenv("LOCALAPPDATA", "").strip()
         if local_appdata:
-            candidates.append(Path(local_appdata) / "OperationalLeverageFramework" / "data")
-        candidates.append(Path.home() / ".operational_leverage_framework" / "data")
+            candidates.append(Path(local_appdata) / "TrustSurface" / "data")
+        candidates.append(Path.home() / ".trust_surface" / "data")
         candidates.append(Path.cwd() / "data")
-        candidates.append(Path(tempfile.gettempdir()) / "OperationalLeverageFramework" / "data")
+        candidates.append(Path(tempfile.gettempdir()) / "TrustSurface" / "data")
 
         for path in candidates:
             try:

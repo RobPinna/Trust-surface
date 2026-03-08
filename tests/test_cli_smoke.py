@@ -20,8 +20,8 @@ def _make_local_tmp(prefix: str) -> Path:
     return path
 
 
-def test_olf_score_cli_smoke() -> None:
-    tmp = _make_local_tmp("olf_score")
+def test_trust_surface_cli_smoke() -> None:
+    tmp = _make_local_tmp("trust_surface")
     input_path = tmp / "input.json"
     output_path = tmp / "result.json"
 

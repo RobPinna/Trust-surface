@@ -1,4 +1,4 @@
-# Operational Leverage Framework — Trust Surface
+# Trust Surface
 
 > **Defensive research project** — Educational CTI tooling for studying automated OSINT collection, trust-surface mapping, and LLM-assisted risk reasoning. Built as a practical portfolio demonstrating end-to-end Cyber Threat Intelligence analyst skills.
 
@@ -36,7 +36,7 @@ Most CTI tooling at entry/mid level involves operating commercial platforms (Mal
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  FastAPI + Jinja2 Web UI                    CLI (olf-score)      │
+│  FastAPI + Jinja2 Web UI                    CLI (trust-surface)      │
 └────────────────────────┬───────────────────────────────────────┘
                          │
           ┌──────────────▼──────────────┐
@@ -82,7 +82,7 @@ Operational-Leverage-Framework/
 │   │   └── trust_workflows.py    # Trust surface mapping
 │   └── utils/                    # Reporting, graphing, PDF export
 ├── src/operational_leverage_framework/   # Typed public package
-│   ├── cli/                      # CLI entry point (olf-score)
+│   ├── cli/                      # CLI entry point (trust-surface)
 │   ├── core/scoring.py           # Reusable scoring API
 │   ├── io/json_loader.py         # Evidence input parsing
 │   └── models/evidence.py        # Evidence schema
@@ -191,7 +191,7 @@ python scripts/run.py web
 
 ```bash
 pip install -e .
-olf-score examples/scenario_hospitality/input.json \
+trust-surface examples/scenario_hospitality/input.json \
   --out output.json --risk-type impersonation
 ```
 
