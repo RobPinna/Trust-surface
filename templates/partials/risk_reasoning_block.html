@@ -61,7 +61,7 @@
 {% set _signal_links = reasoning.signal_links if reasoning.signal_links is defined and reasoning.signal_links else [] %}
 {% set _full_text = reasoning_full_text if reasoning_full_text is defined else false %}
 <div class="mt-3 grid grid-cols-1 {% if not _compact %}sm:grid-cols-2{% endif %} gap-2">
-  <article class="info-card compact">
+  <article class="info-card compact reasoning-card">
     <p class="kpi-label">What we saw</p>
     <div class="wws-struct mt-2 {% if _compact %}compact{% endif %}" role="note" aria-label="What we saw in structured editor style">
       <div class="wws-line"><span class="wws-label">linked evidence items</span> <span class="wws-brace">{</span></div>
@@ -113,7 +113,7 @@
       <div class="wws-line"><span class="wws-brace">]</span></div>
     </div>
   </article>
-  <article class="info-card compact">
+  <article class="info-card compact reasoning-card">
     <p class="kpi-label">Why it matters</p>
     <p class="item-description mt-1 {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300 whitespace-normal break-words {% if _full_text %}line-clamp-none max-h-none overflow-visible{% endif %}">{{ _why_ns.text }}</p>
     {% if (not _hide_how) and _how_struct and _how_struct.get('items') %}

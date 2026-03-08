@@ -778,6 +778,10 @@ i[data-lucide],
     linear-gradient(180deg, rgba(11, 12, 20, 0.24), rgba(8, 9, 15, 0.15));
 }
 
+.info-card.reasoning-card {
+  padding: 2rem !important;
+}
+
 .kpi-card {
   border-radius: var(--radius-md);
   padding: 1.12rem;
@@ -1320,15 +1324,23 @@ i[data-lucide],
   min-width: 180px;
   max-width: 260px;
   font-weight: 400;
+  white-space: normal;
+  overflow: visible;
 }
 
 .risk-recipe-row .recipe-text {
   min-width: 0;
+  width: 100%;
 }
 
 .risk-recipe-row .recipe-title,
 .risk-recipe-row .recipe-meta {
   font-weight: 400;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .risk-recipe-row .recipe-plus {
