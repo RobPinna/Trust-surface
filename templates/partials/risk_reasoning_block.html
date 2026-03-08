@@ -60,87 +60,95 @@
 {% endfor %}
 {% set _signal_links = reasoning.signal_links if reasoning.signal_links is defined and reasoning.signal_links else [] %}
 {% set _full_text = reasoning_full_text if reasoning_full_text is defined else false %}
-<div class="mt-3 grid grid-cols-1 {% if not _compact %}sm:grid-cols-2{% endif %} gap-2">
-  <article class="info-card compact reasoning-card">
-    <p class="kpi-label">What we saw</p>
-    <div class="wws-struct mt-2 {% if _compact %}compact{% endif %}" role="note" aria-label="What we saw in structured editor style">
-      <div class="wws-line"><span class="wws-label">linked evidence items</span> <span class="wws-brace">{</span></div>
-      <div class="wws-line"><span class="wws-indent-1"></span><span class="wws-count">{{ _wws_evidence_count }}</span> <span class="wws-note">risk-linked</span></div>
-      <div class="wws-line"><span class="wws-indent-1"></span><span class="wws-count">{{ _wws_correlated_count }}</span> <span class="wws-note">correlated indicators</span></div>
-      <div class="wws-line"><span class="wws-brace">}</span></div>
-      <div class="wws-line">&nbsp;</div>
-      <div class="wws-line"><span class="wws-label">signal types</span> <span class="wws-brace">{</span></div>
-      <div class="wws-line">
-        <span class="wws-indent-1"></span><span class="wws-types">{{ _wws_signal_types_text if _wws_signal_types_text else _wws_summary }}</span>
-      </div>
-      {% if _wws_key_conditions %}
-      <div class="wws-line"><span class="wws-indent-1"></span><span class="wws-note">Key conditions:</span></div>
-      <div class="wws-line"><span class="wws-indent-2"></span><span class="wws-conditions">{{ _wws_key_conditions }}</span></div>
-      {% endif %}
-      <div class="wws-line"><span class="wws-brace">}</span></div>
-      <div class="wws-line">&nbsp;</div>
-      <div class="wws-line"><span class="wws-label">signals</span><span class="wws-op">:</span> <span class="wws-brace">[</span></div>
-      {% set _wws_ns = namespace(has_signal=false) %}
-      {% for _sig in _wws_signals.split('|') %}
-        {% set _sig_text = _sig | trim %}
-        {% if _sig_text %}
-          {% set _wws_ns.has_signal = true %}
-          {% set _sig_code = _sig_text.split(' ', 1)[0] if _sig_text[:2] == 'E-' else '' %}
-          {% set _sig_link = namespace(url='') %}
-          {% if _sig_code and _signal_links %}
-            {% for _sl in _signal_links %}
-              {% if _sl.code == _sig_code and _sl.doc_url %}
-                {% set _sig_link.url = _sl.doc_url %}
-              {% endif %}
-            {% endfor %}
-          {% endif %}
-          <div class="wws-line wws-signal-row">
-            <span class="wws-indent-1"></span>
-            {% if _sig_text[:2] == 'E-' %}
-            <span class="wws-signal-text">{{ _sig_text }}</span>
-            {% else %}
-            <span class="wws-signal-text">"{{ _sig_text | replace('"', '\\"') }}"</span>
-            {% endif %}
-            {% if _sig_link.url %}
-            <a class="wws-signal-link" href="{{ _sig_link.url }}" title="Open evidence document detail" aria-label="Open evidence document detail">&#8599;</a>
-            {% endif %}
-          </div>
+{% set _rationale_text = '' %}
+{% if reasoning.rationale is defined and (reasoning.rationale or '') | trim %}
+  {% set _rationale_text = (reasoning.rationale or '') | trim %}
+{% elif _how_struct and _how_struct.get('rationale') %}
+  {% set _rationale_text = (_how_struct.get('rationale') or '') | trim %}
+{% endif %}
+{% if not _rationale_text and _rationale_override %}
+  {% set _rationale_text = _rationale_override %}
+{% endif %}
+{% set _rationale_display = _rationale_text if _rationale_text else _why_ns.text %}
+<div class="mt-3 grid grid-cols-1 {% if not _compact %}sm:grid-cols-2{% endif %} gap-2 reasoning-grid">
+  <div class="reasoning-stack why-stack">
+    <article class="info-card compact reasoning-card why-card">
+      <p class="kpi-label">Rationale</p>
+      <p class="item-description mt-1 rationale-text {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300 whitespace-normal break-words {% if _full_text %}line-clamp-none max-h-none overflow-visible{% endif %}">{{ _rationale_display }}</p>
+      {% if (not _hide_how) and _how_struct and _how_struct.get('items') %}
+      <div class="mt-3">
+        <p class="kpi-label">How</p>
+        <ol class="mt-2 space-y-2">
+          {% for _h in _how_struct.get('items', []) %}
+          <li class="flex gap-2 item-description {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300">
+            <span class="text-amber-300">{{ loop.index }}.</span>
+            <span data-how-code-highlight="1">{{ _h }}</span>
+          </li>
+          {% endfor %}
+        </ol>
+        {% if _how_struct.get('uncertainty') %}
+        <p class="item-meta mt-4"><span class="text-slate-300">Uncertainty:</span> {{ _how_struct.get('uncertainty') }}</p>
         {% endif %}
-      {% endfor %}
-      {% if not _wws_ns.has_signal %}
-      <div class="wws-line"><span class="wws-indent-1"></span><span class="wws-note">// no sample signals captured</span></div>
+      </div>
+      {% elif (not _hide_how) and _how_text %}
+      <div class="mt-3">
+        <p class="kpi-label">How</p>
+        <p class="item-description mt-1 {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300 whitespace-normal break-words {% if _full_text %}line-clamp-none max-h-none overflow-visible{% endif %}" data-how-code-highlight="1">{{ _how_text }}</p>
+      </div>
       {% endif %}
-      <div class="wws-line"><span class="wws-brace">]</span></div>
-    </div>
-  </article>
-  <article class="info-card compact reasoning-card">
-    <p class="kpi-label">Why it matters</p>
-    <p class="item-description mt-1 {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300 whitespace-normal break-words {% if _full_text %}line-clamp-none max-h-none overflow-visible{% endif %}">{{ _why_ns.text }}</p>
-    {% if (not _hide_how) and _how_struct and _how_struct.get('items') %}
-    <div class="mt-3">
-      <p class="kpi-label">How</p>
-      <ol class="mt-2 space-y-2">
-        {% for _h in _how_struct.get('items', []) %}
-        <li class="flex gap-2 item-description {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300">
-          <span class="text-amber-300">{{ loop.index }}.</span>
-          <span data-how-code-highlight="1">{{ _h }}</span>
-        </li>
+    </article>
+  </div>
+
+  <div class="reasoning-stack wws-stack">
+    <article class="info-card compact reasoning-card wws-card">
+      <p class="kpi-label">What we saw</p>
+      <div class="wws-struct mt-2 {% if _compact %}compact{% endif %}" role="note" aria-label="What we saw in structured editor style">
+        <div class="wws-line"><span class="wws-label">linked evidence items</span> <span class="wws-brace">{</span></div>
+        <div class="wws-line"><span class="wws-indent-1"></span><span class="wws-count">{{ _wws_evidence_count }}</span> <span class="wws-note">risk-linked</span></div>
+        <div class="wws-line"><span class="wws-indent-1"></span><span class="wws-count">{{ _wws_correlated_count }}</span> <span class="wws-note">correlated indicators</span></div>
+        <div class="wws-line"><span class="wws-brace">}</span></div>
+        <div class="wws-line">&nbsp;</div>
+        <div class="wws-line"><span class="wws-label">signal types</span> <span class="wws-brace">{</span></div>
+        <div class="wws-line">
+          <span class="wws-indent-1"></span><span class="wws-types">{{ _wws_signal_types_text if _wws_signal_types_text else _wws_summary }}</span>
+        </div>
+        <div class="wws-line"><span class="wws-brace">}</span></div>
+        <div class="wws-line">&nbsp;</div>
+        <div class="wws-line"><span class="wws-label">signals</span><span class="wws-op">:</span> <span class="wws-brace">[</span></div>
+        {% set _wws_ns = namespace(has_signal=false) %}
+        {% for _sig in _wws_signals.split('|') %}
+          {% set _sig_text = _sig | trim %}
+          {% if _sig_text %}
+            {% set _wws_ns.has_signal = true %}
+            {% set _sig_code = _sig_text.split(' ', 1)[0] if _sig_text[:2] == 'E-' else '' %}
+            {% set _sig_link = namespace(url='') %}
+            {% if _sig_code and _signal_links %}
+              {% for _sl in _signal_links %}
+                {% if _sl.code == _sig_code and _sl.doc_url %}
+                  {% set _sig_link.url = _sl.doc_url %}
+                {% endif %}
+              {% endfor %}
+            {% endif %}
+            <div class="wws-line wws-signal-row">
+              <span class="wws-indent-1"></span>
+              {% if _sig_text[:2] == 'E-' %}
+              <span class="wws-signal-text">{{ _sig_text }}</span>
+              {% else %}
+              <span class="wws-signal-text">"{{ _sig_text | replace('"', '\\"') }}"</span>
+              {% endif %}
+              {% if _sig_link.url %}
+              <a class="wws-signal-link" href="{{ _sig_link.url }}" title="Open evidence document detail" aria-label="Open evidence document detail">&#8599;</a>
+              {% endif %}
+            </div>
+          {% endif %}
         {% endfor %}
-      </ol>
-      {% if _how_struct.get('rationale') %}
-      <p class="item-meta mt-5"><span class="text-slate-300">Rationale:</span> {{ _how_struct.get('rationale') }}</p>
-      {% endif %}
-      {% if _how_struct.get('uncertainty') %}
-      <p class="item-meta mt-4"><span class="text-slate-300">Uncertainty:</span> {{ _how_struct.get('uncertainty') }}</p>
-      {% endif %}
-    </div>
-    {% elif (not _hide_how) and _how_text %}
-    <div class="mt-3">
-      <p class="kpi-label">How</p>
-      <p class="item-description mt-1 {% if _compact %}text-xs{% else %}text-sm{% endif %} text-slate-300 whitespace-normal break-words {% if _full_text %}line-clamp-none max-h-none overflow-visible{% endif %}" data-how-code-highlight="1">{{ _how_text }}</p>
-    </div>
-    {% endif %}
-  </article>
+        {% if not _wws_ns.has_signal %}
+        <div class="wws-line"><span class="wws-indent-1"></span><span class="wws-note">// no sample signals captured</span></div>
+        {% endif %}
+        <div class="wws-line"><span class="wws-brace">]</span></div>
+      </div>
+    </article>
+  </div>
 </div>
 <script>
   (function () {

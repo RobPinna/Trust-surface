@@ -2940,14 +2940,184 @@ def _pick_recipe_bundles(bundles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _llm_recipe_title(value: str, *, max_chars: int = 96) -> str:
+def _llm_recipe_title(value: str, *, max_chars: int = 220, max_words: int = 12) -> str:
     text = " ".join(str(value or "").split()).strip()
     if not text:
         return ""
     text = re.sub(r"\[(?:E-\d{2,3}(?:\s*,\s*E-\d{2,3})*)\]", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"^\d+\s*[\)\.\:\-]\s*", "", text).strip()
-    text = _first_sentence(text, max_chars=max_chars).strip(" .,:;-")
-    return text[:max_chars]
+    text = re.sub(r"\([^)]*\)", "", text).strip()
+    low = text.lower()
+
+    signal = ""
+    if ("linkedin" in low or "social" in low) and ("role" in low or "team" in low or "staff" in low):
+        signal = "Public role exposure on social profiles"
+    elif "linkedin" in low or "social" in low:
+        signal = "Social-profile exposure"
+    elif "role" in low or "team" in low or "staff" in low:
+        signal = "Public role exposure"
+    elif any(k in low for k in ["contact channel", "entrypoint", "email", "dm", "helpdesk", "support channel"]):
+        signal = "Channel ambiguity"
+    elif any(k in low for k in ["vendor", "third-party", "partner platform", "outsourc", "contractor"]):
+        signal = "Third-party trust cues"
+
+    attack = ""
+    if any(k in low for k in ["impersonat", "pose as", "spoof"]):
+        attack = "impersonation"
+    elif any(k in low for k in ["spear-phish", "phish"]):
+        attack = "targeted phishing"
+    elif any(k in low for k in ["social engineer", "pretext"]):
+        attack = "social engineering"
+    elif any(k in low for k in ["manipulat", "induce", "pressure"]):
+        attack = "workflow manipulation"
+    elif any(k in low for k in ["account takeover", "credential", "unauthorized access", "account access"]):
+        attack = "unauthorized access pressure"
+
+    target = ""
+    if any(k in low for k in ["finance", "payment", "invoice", "bank", "billing"]):
+        target = "financial workflows"
+    elif any(k in low for k in ["client", "customer", "partner"]):
+        target = "trusted clients"
+    elif any(k in low for k in ["support", "helpdesk", "service desk"]):
+        target = "support workflows"
+    elif any(k in low for k in ["engineer", "employee", "staff", "admin", "team member"]):
+        target = "internal staff"
+    elif any(k in low for k in ["account", "credential", "data"]):
+        target = "account access"
+
+    synthesized = ""
+    if signal and attack and target:
+        synthesized = f"{signal} enabling {attack} on {target}"
+    elif signal and attack:
+        synthesized = f"{signal} enabling {attack}"
+    elif attack and target:
+        synthesized = f"{attack.capitalize()} on {target}"
+    elif signal:
+        synthesized = signal
+    else:
+        simplified = re.sub(
+            r"\b(an|the)?\s*(adversary|attacker|threat actors?|malicious actors?)\s+(could|can|may|would likely|would|likely)\b",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        simplified = re.sub(r"\b(could|can|may|would likely|likely|potentially)\b", "", simplified, flags=re.IGNORECASE)
+        simplified = " ".join(simplified.split()).strip(" .,:;-")
+        if simplified:
+            synthesized = simplified
+
+    if not synthesized:
+        synthesized = text.strip(" .,:;-")
+
+    words = [w for w in synthesized.split() if w]
+    if max_words > 0 and len(words) > max_words:
+        if not (signal or attack or target):
+            stop = {
+                "the",
+                "and",
+                "for",
+                "with",
+                "that",
+                "this",
+                "from",
+                "into",
+                "they",
+                "their",
+                "could",
+                "would",
+                "may",
+                "likely",
+                "potentially",
+                "using",
+                "via",
+                "through",
+                "expecting",
+            }
+            key_terms: list[str] = []
+            seen_terms: set[str] = set()
+            for raw in words:
+                tok = re.sub(r"[^a-z0-9\-]", "", raw.lower())
+                if not tok or tok in stop or len(tok) < 3 or tok in seen_terms:
+                    continue
+                seen_terms.add(tok)
+                key_terms.append(raw.strip(" .,:;-"))
+                if len(key_terms) >= max_words:
+                    break
+            if key_terms:
+                synthesized = " ".join(key_terms).strip(" .,:;-")
+        words = [w for w in synthesized.split() if w]
+        if len(words) > max_words:
+            synthesized = " ".join(words[:max_words]).strip(" .,:;-")
+    if max_chars > 0 and len(synthesized) > max_chars:
+        char_words = [w for w in synthesized.split() if w]
+        while char_words and len(" ".join(char_words)) > max_chars:
+            char_words.pop()
+        synthesized = " ".join(char_words).strip(" .,:;-")
+    return synthesized
+
+
+def _llm_recipe_element_label(
+    *,
+    seed_text: str,
+    signal_types: list[str],
+    evidence_rows: list[dict[str, Any]],
+) -> str:
+    st = {str(x or "").strip().upper() for x in (signal_types or []) if str(x or "").strip()}
+    blob_parts: list[str] = [str(seed_text or "")]
+    for ev in (evidence_rows or [])[:8]:
+        if not isinstance(ev, dict):
+            continue
+        blob_parts.append(str(ev.get("title", "") or ""))
+        blob_parts.append(str(ev.get("snippet", "") or ""))
+        blob_parts.append(str(ev.get("signal_type", "") or ""))
+    blob = " ".join(" ".join(x.split()) for x in blob_parts if str(x).strip()).lower()
+
+    exposure = ""
+    if (
+        any(k in st for k in {"ROLE_CUE", "PUBLIC_ROLE", "STAFF_CUE", "IDENTITY_SIGNAL"})
+        or any(k in blob for k in ["public role", "team role", "staff role", "linkedin", "social profile"])
+    ):
+        exposure = "Public role exposure"
+    elif (
+        any(k in st for k in {"CONTACT_CHANNEL", "OFFICIAL_CHANNEL", "CHANNEL_CUE", "ENTRYPOINT_CUE"})
+        or any(k in blob for k in ["contact channel", "entrypoint", "public email", "dm"])
+    ):
+        exposure = "Multi-channel contact exposure"
+    elif (
+        any(k in st for k in {"PROCESS_CUE", "WORKFLOW_CUE", "WORKFLOW_HANDLING_CUES"})
+        or any(k in blob for k in ["workflow", "process", "approval flow", "operational procedure"])
+    ):
+        exposure = "Workflow process cues"
+    elif (
+        any(k in st for k in {"VENDOR_CUE", "THIRD_PARTY_CUE"})
+        or any(k in blob for k in ["vendor", "third-party", "partner platform", "contractor"])
+    ):
+        exposure = "Third-party dependency cues"
+    elif (
+        any(k in st for k in {"INFRA_CUE", "PORTAL_CUE", "SUPPORT_ENDPOINT"})
+        or any(k in blob for k in ["portal", "helpdesk", "login endpoint", "vpn", "remote admin"])
+    ):
+        exposure = "Public support/portal exposure"
+
+    outcome = ""
+    if any(k in blob for k in ["impersonat", "pose as", "spoof"]):
+        outcome = "impersonation attempts"
+    elif any(k in blob for k in ["spear-phish", "phish"]):
+        outcome = "targeted phishing attempts"
+    elif any(k in blob for k in ["social engineer", "pretext"]):
+        outcome = "social-engineering pressure"
+    elif any(k in blob for k in ["manipulat", "urgent request", "payment redirection", "invoice"]):
+        outcome = "request-manipulation attempts"
+    elif any(k in blob for k in ["credential", "account takeover", "unauthorized access", "data access"]):
+        outcome = "unauthorized-access attempts"
+
+    if exposure and outcome:
+        return f"{exposure} enabling {outcome}"
+    if exposure:
+        return exposure
+    if outcome:
+        return outcome[:1].upper() + outcome[1:]
+    return _llm_recipe_title(seed_text, max_chars=140, max_words=9)
 
 
 def _build_llm_recipe_bundles(
@@ -2965,16 +3135,16 @@ def _build_llm_recipe_bundles(
 
     seeds: list[str] = []
     for item in list(hyp.get("items") or [])[:6]:
-        line = _llm_recipe_title(str(item or ""), max_chars=120)
+        line = _llm_recipe_title(str(item or ""), max_chars=220)
         if line:
             seeds.append(line)
     for step in list(sections.get("abuse_path") or [])[:6]:
         if not isinstance(step, dict):
             continue
-        line = _llm_recipe_title(str(step.get("title", "") or step.get("detail", "")), max_chars=120)
+        line = _llm_recipe_title(str(step.get("title", "") or step.get("detail", "")), max_chars=220)
         if line:
             seeds.append(line)
-    how_seed = _llm_recipe_title(str(sections.get("how", "") or ""), max_chars=120)
+    how_seed = _llm_recipe_title(str(sections.get("how", "") or ""), max_chars=220)
     if how_seed:
         seeds.append(how_seed)
 
@@ -2986,7 +3156,7 @@ def _build_llm_recipe_bundles(
             continue
         seen.add(key)
         deduped.append(row)
-        if len(deduped) >= max_items:
+        if len(deduped) >= max(6, max_items * 3):
             break
     if not deduped:
         return []
@@ -2994,6 +3164,7 @@ def _build_llm_recipe_bundles(
     bundles: list[dict[str, Any]] = []
     why_seed = " ".join(str(sections.get("why_it_matters", "")).split()).strip()
     impact_seed = " ".join(str(sections.get("business_impact", "")).split()).strip()
+    seen_titles: set[str] = set()
     for idx, seed in enumerate(deduped, start=1):
         focused = _focused_evidence_subset(
             evidence_rows,
@@ -3007,12 +3178,17 @@ def _build_llm_recipe_bundles(
                 if str(ev.get("signal_type", "")).strip()
             }
         )[:6]
+        title = _llm_recipe_element_label(seed_text=seed, signal_types=signal_types, evidence_rows=list(focused or []))
+        title_key = re.sub(r"[^a-z0-9]+", " ", str(title or "").lower()).strip()
+        if not title_key or title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
         bundles.append(
             {
                 "id": f"llm_recipe_{idx}",
-                "title": _llm_recipe_title(seed, max_chars=96) or f"LLM ingredient {idx}",
-                "display_name": _llm_recipe_title(seed, max_chars=96) or f"LLM ingredient {idx}",
-                "short_label": _llm_recipe_title(seed, max_chars=64) or f"Ingredient {idx}",
+                "title": title or f"LLM ingredient {idx}",
+                "display_name": title or f"LLM ingredient {idx}",
+                "short_label": _llm_recipe_title(title, max_chars=64, max_words=7) or f"Ingredient {idx}",
                 "internal_name": "LLM_CORRELATED",
                 "bundle_type": "LLM_CORRELATED",
                 "icon": "sparkles",
@@ -3022,6 +3198,8 @@ def _build_llm_recipe_bundles(
                 "evidence": list(focused or [])[:10],
             }
         )
+        if len(bundles) >= max_items:
+            break
     return bundles[:max_items]
 
 
@@ -4099,10 +4277,15 @@ def build_overview_viewmodel(
 
         summary_raw = ""
         if isinstance(dreason, dict):
-            summary_raw = " ".join(str(dreason.get("why_it_matters") or dreason.get("why") or "").split()).strip()
+            summary_raw = " ".join(str(dreason.get("rationale", "") or "").split()).strip()
+            if not summary_raw:
+                how_struct = dreason.get("how_struct") if isinstance(dreason.get("how_struct"), dict) else {}
+                summary_raw = " ".join(str(how_struct.get("rationale", "") or "").split()).strip()
+            if not summary_raw:
+                summary_raw = " ".join(str(dreason.get("why_it_matters") or dreason.get("why") or "").split()).strip()
         if not summary_raw:
             summary_raw = " ".join(str(row.get("why_matters", "") or "").split()).strip()
-        summary_text = summary_raw if summary_raw else "Open for evidence and defensive controls."
+        summary_text = _first_sentence(summary_raw, max_chars=220) if summary_raw else "Open for evidence and defensive controls."
 
         title_text = (
             str(drisk.get("headline", "")).strip()

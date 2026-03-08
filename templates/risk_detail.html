@@ -78,42 +78,6 @@
     </section>
 
     <section class="panel p-6">
-      <div class="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h3 class="section-title">Risk recipe</h3>
-          <p class="section-subtitle">Signals that combine into a decision-ready risk outcome.</p>
-        </div>
-      </div>
-      <div class="mt-5 risk-recipe-flow">
-        <div class="risk-recipe-row">
-          {% for b in vm.recipe_bundles %}
-          <button
-            type="button"
-            class="recipe-block"
-            @click="openEvidence({{ ('bundle:' ~ b.id) | tojson }}, {{ b.title | tojson }})"
-            {% if b.hover_tooltip %}data-tooltip="{{ b.hover_tooltip }}" data-tooltip-rich="1" data-tooltip-near="1"{% endif %}
-          >
-            <span class="recipe-text">
-              <span class="recipe-title">{{ b.title }}</span>
-              <span class="recipe-meta">{{ b.item_count }} items</span>
-            </span>
-          </button>
-          {% if not loop.last %}
-          <span class="recipe-plus">+</span>
-          {% endif %}
-          {% endfor %}
-        </div>
-        <div class="risk-recipe-divider" aria-hidden="true"></div>
-        <div class="risk-recipe-outcome-wrap">
-          <span class="recipe-arrow recipe-arrow-down" aria-hidden="true">&darr;</span>
-          <div class="recipe-outcome">
-            <span class="recipe-title">{{ vm.risk.primary_risk_type if vm.risk.primary_risk_type else vm.risk.title }}</span>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel p-6">
       <div class="section-header-row">
         <div>
           <h3 class="section-title">Abuse path</h3>
