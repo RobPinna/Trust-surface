@@ -2,6 +2,8 @@
 
 > **Defensive research project** — Educational CTI tooling for studying automated OSINT collection, trust-surface mapping, and LLM-assisted risk reasoning. Built as a practical portfolio demonstrating end-to-end Cyber Threat Intelligence analyst skills.
 
+![Trust Surface demo](Demo_1.gif)
+
 ---
 
 ## What it does
