@@ -1,6 +1,6 @@
 # Trust Surface
 
-> **Defensive research project** — Educational CTI tooling for studying automated OSINT collection, trust-surface mapping, and LLM-assisted risk reasoning. Built as a practical portfolio demonstrating end-to-end Cyber Threat Intelligence analyst skills.
+> **Defensive research project** — An evidence-first CTI framework that treats social engineering risk as a structured, queryable attack surface. Built from scratch in Python, vibe-coded with manual review of architecture decisions and post-generation code verification, a workflow shaped by a decade of fullstack development. Strictly defensive, public data only.
 
 ![Trust Surface demo](Demo_1.gif)
 
@@ -8,16 +8,20 @@
 
 ## What it does
 
-**Trust Surface** is an evidence-first framework that automates the OSINT collection and analysis workflow a CTI analyst would normally perform manually. Given a target organization (company name + domain + sector), it:
+You give it a company name, domain, and sector. It collects public evidence from 17 sources, correlates signals cross-source, and uses LLM reasoning to produce scored risk hypotheses with full evidence chains — each one answering: **where could an adversary leverage your organization's public trust relationships to gain access?**
+
+The analytical focus is **trust leverage and social engineering risk**: the attack surface exposed through an organization's public workflows, vendor relationships, and communication channels that an adversary could exploit to conduct BEC, spear-phishing, impersonation, or supply-chain manipulation.
+
+The core contribution is the analytical frame itself: **"trust surface"** and **"operational leverage"** as formal concepts applied to social engineering risk.
+
+### Pipeline
 
 1. **Collects** public signals from 17 specialized connectors (DNS, breach data, brand impersonation, job postings, news, social mentions, web infrastructure, procurement documents, and more)
 2. **Classifies** each evidence signal by quality tier (`BOILERPLATE → LOW → MED → HIGH`) and filters noise automatically
 3. **Correlates** evidence cross-source using a BM25 RAG pipeline to surface non-obvious relationships
-4. **Reasons** over correlated evidence with an LLM (OpenAI GPT-4.1 / Anthropic Claude / local fallback) to generate structured risk hypotheses
-5. **Scores** each risk with a multi-component confidence formula accounting for signal diversity, source independence, and coverage depth
+4. **Reasons** over correlated evidence with an LLM (OpenAI GPT-4.1 / Anthropic Claude / deterministic local fallback) to generate structured risk hypotheses
+5. **Scores** each risk with a deterministic confidence formula accounting for signal diversity, source independence, and coverage depth
 6. **Reports** findings as a structured PDF/JSON artifact with risk narrative, evidence chain, and confidence metadata
-
-The analytical focus is **trust leverage and social engineering risk** — the attack surface exposed through an organization's public workflows, vendor relationships, and communication channels that an adversary could exploit to conduct BEC, spear-phishing, impersonation, or supply-chain manipulation.
 
 ---
 
@@ -38,8 +42,8 @@ Most CTI tooling at entry/mid level involves operating commercial platforms (Mal
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  FastAPI + Jinja2 Web UI                    CLI (trust-surface)      │
-└────────────────────────┬───────────────────────────────────────┘
+│  FastAPI + Jinja2 Web UI                    CLI (trust-surface) │
+└────────────────────────┬────────────────────────────────────────┘
                          │
           ┌──────────────▼──────────────┐
           │     Assessment Orchestrator  │
@@ -75,23 +79,28 @@ Most CTI tooling at entry/mid level involves operating commercial platforms (Mal
 Operational-Leverage-Framework/
 ├── app/                          # FastAPI runtime application
 │   ├── connectors/               # 17 OSINT data connectors
-│   ├── routers/                  # API endpoints
-│   ├── services/                 # Core business logic
+│   ├── routers/                  # API endpoints + UI routes
+│   ├── services/                 # Core business logic (~13.6k LoC)
 │   │   ├── collector_v2.py       # Orchestration and collection
 │   │   ├── evidence_quality_classifier.py
 │   │   ├── signal_model.py       # Confidence scoring formula
 │   │   ├── risk_story.py         # Risk narrative builder
+│   │   ├── risk_brief_service.py # LLM-generated risk briefs
+│   │   ├── cross_signal.py       # Multi-source signal correlation
 │   │   └── trust_workflows.py    # Trust surface mapping
 │   └── utils/                    # Reporting, graphing, PDF export
 ├── src/operational_leverage_framework/   # Typed public package
 │   ├── cli/                      # CLI entry point (trust-surface)
 │   ├── core/scoring.py           # Reusable scoring API
+│   ├── scoring/signal_model.py   # Core confidence formula (487 LoC)
 │   ├── io/json_loader.py         # Evidence input parsing
-│   └── models/evidence.py        # Evidence schema
+│   └── models/evidence.py        # Evidence schema (TypedDict)
 ├── src/rag/                      # BM25 retrieval pipeline
 ├── src/reasoner/                 # LLM reasoning layer
+├── templates/                    # Jinja2 HTML templates (Tailwind + Alpine.js + HTMX)
+├── static/                       # Frontend assets (JS, CSS)
 ├── examples/                     # Offline deterministic scenarios
-├── tests/                        # Unit, integration, smoke tests
+├── tests/                        # 75 tests across 5 files
 ├── docs/                         # Architecture and design decisions
 └── scripts/                      # Build, setup, safety tools
 ```
@@ -102,24 +111,46 @@ Operational-Leverage-Framework/
 
 | Connector | Source | API Key | Signal type |
 |-----------|--------|---------|-------------|
-| `website_analyzer` | Target website | No | Vendor deps, workflow cues |
-| `official_channel_enumerator` | Public social/web | No | Channel ambiguity |
-| `public_role_extractor` | Public web | No | Role exposure |
-| `email_posture_analyzer` | DNS (SPF/DMARC/DKIM) | No | Email spoofing risk |
-| `dns_footprint` | DNS (A/MX/NS/CNAME) | No | Infrastructure exposure |
-| `subdomain_discovery` | DNS brute + CT | No | Attack surface expansion |
+| `website_analyzer` | Target website crawl | No | Vendor deps, workflow cues, process signals |
+| `official_channel_enumerator` | Public social/web | No | Channel ambiguity, contact exposure |
+| `public_role_extractor` | Public web / LinkedIn | No | Org chart leakage, role exposure |
+| `email_posture_analyzer` | DNS (SPF/DMARC/DKIM) | No | Email spoofing risk, policy posture |
+| `dns_footprint` | DNS (A/MX/NS/CNAME/AAAA) | No | Infrastructure exposure |
+| `subdomain_discovery` | DNS brute + Certificate Transparency | No | Attack surface expansion |
 | `brand_impersonation_monitor` | DNS + RDAP + crt.sh | No | Typosquat / lookalike domains |
 | `gdelt_news` | GDELT API | No | News mentions (EN + AR for MENA) |
-| `media_trend` | Public news | No | Brand sentiment trend |
+| `media_trend` | Public news aggregation | No | Brand sentiment trend |
 | `social_twitter` | Twitter/X v2 API | Bearer token | Social mentions (EN + AR for MENA) |
-| `job_postings_live` | Public job boards | No | Stack/vendor disclosure |
+| `job_postings_live` | Public job boards | No | Stack/vendor/process disclosure |
 | `vendor_js_detection` | Website JS analysis | No | Workflow vendor fingerprinting |
-| `procurement_documents` | Public procurement | No | Partner/supplier relationships |
-| `public_docs_pdf` | Indexed PDFs | No | Document exposure |
-| `public_role_extractor` | LinkedIn/public | No | Org chart leakage |
+| `procurement_documents` | Public procurement portals | No | Partner/supplier relationships |
+| `public_docs_pdf` | Indexed PDFs | No | Document exposure (policies, reports) |
 | `virustotal` | VirusTotal API | Required | Domain/IP reputation |
-| `shodan` | Shodan API | Required | Host/port/vuln exposure |
+| `shodan` | Shodan API | Required | Host/port/vulnerability exposure |
 | `hibp_breach_domain` | HIBP API | Required | Credential breach data |
+
+---
+
+## Signal types (14)
+
+The scoring model classifies evidence into 14 canonical signal types:
+
+| Signal | Description |
+|--------|-------------|
+| `CONTACT_CHANNEL` | Email, phone, form — external contact points |
+| `SOCIAL_TRUST_NODE` | Verified social profiles and handles |
+| `PROCESS_CUE` | Invoicing, billing, refunds, onboarding workflows |
+| `VENDOR_CUE` | Third-party vendor dependencies (Zendesk, Stripe, Okta, etc.) |
+| `ORG_CUE` | Org chart, roles, departments |
+| `EXTERNAL_ATTENTION` | Press mentions, news coverage |
+| `INFRA_CUE` | DNS, IP, subdomain infrastructure data |
+| `EMAIL_SPOOFING_RISK` | Weak email authentication posture |
+| `DMARC_POLICY_WEAK` | Permissive DMARC policy detected |
+| `DMARC_POLICY_STRONG` | Enforcing DMARC policy detected |
+| `MULTIPLE_MX_PROVIDER` | Mail delegation across providers |
+| `ROLE_TARGETABILITY_SIGNAL` | Named executive/decision-maker roles exposed |
+| `CHANNEL_AMBIGUITY_SIGNAL` | Multiple official contact channels (confusion vector) |
+| `DIRECT_MESSAGE_WORKFLOW_SIGNAL` | WhatsApp, Telegram, DM-based workflows |
 
 ---
 
@@ -132,6 +163,9 @@ Operational-Leverage-Framework/
 | **Social engineering** | Trust relationship exploitation, pretexting surface |
 | **Operational leverage** | Vendor/partner chain as entry point for manipulation |
 | **Credential exposure** | Breach data correlated with active infrastructure |
+| **Account takeover** | Password reset, login, identity workflow exploitation |
+| **Supply chain dependency** | Downstream pivot risk through vendor trust |
+| **Channel ambiguity** | Multiple official channels creating confusion vectors |
 
 ---
 
@@ -142,6 +176,7 @@ Operational-Leverage-Framework/
 - **Multi-provider LLM with offline fallback** — the reasoner supports OpenAI GPT-4.1, Anthropic Claude, and a deterministic local path for reproducible offline demos
 - **BM25 RAG without vector store** — evidence is indexed locally using BM25 TF-IDF; no embedding API cost, no external dependency
 - **Safety filters on LLM output** — the reasoner prompt explicitly prohibits generating actionable attack instructions
+- **Deterministic confidence scoring** — confidence is computed by formula, not by LLM; the LLM generates hypotheses, the formula scores them
 
 See [docs/decisions.md](docs/decisions.md) for full architectural rationale.
 
@@ -149,17 +184,31 @@ See [docs/decisions.md](docs/decisions.md) for full architectural rationale.
 
 ## Scoring model
 
-Confidence (1–100) is computed as:
+Confidence (1–100) is computed deterministically:
 
 ```
-confidence = baseline_avg
-           + signal_diversity_bonus     # unique signal types covered
-           + url_diversity_bonus        # source independence
-           - boilerplate_penalty        # low-quality evidence weight
-           + critical_signal_bonus      # risk-type-specific required signals
+confidence = 55 (baseline)
+           + 6 × max(0, signal_diversity − 1)     # unique signal types covered
+           + 5 × max(0, min(3, distinct_urls − 1)) # source independence (capped at 3)
+           − 10 if dominance_ratio > 0.60           # repetition penalty
+           − 8  if missing_critical_signals          # required signals absent
 ```
 
-Each risk type has a set of **critical signals** that must be present to reach `STRONG` coverage. Missing critical signals are surfaced in the output as `missing_signals`, giving defenders an explicit gap analysis.
+**Evidence quality tiers** weight each signal:
+
+| Tier | Weight | Example |
+|------|--------|---------|
+| `HIGH` | 1.0 | DNS records, breach data, DMARC policy |
+| `MED` | 0.5–0.8 | Job postings, vendor JS, procurement |
+| `LOW` | 0.1–0.3 | News mentions, generic web content |
+| `BOILERPLATE` | 0.0 | GTM, GA4, CDN analytics — excluded |
+
+**Confidence caps** enforce conservative scoring:
+- Contact-only evidence → capped at 65
+- Policy-only evidence → capped at 70
+- Confidence >75 requires ≥2 distinct URLs AND a critical signal
+
+Each risk type has a set of **critical signals** (e.g., `PROCESS_CUE`, `VENDOR_CUE`, `ORG_CUE` for impersonation risk). Missing critical signals are surfaced as `missing_signals`, giving defenders an explicit gap analysis.
 
 ---
 
@@ -223,6 +272,9 @@ TWITTER_BEARER_TOKEN=...
 
 # VirusTotal — domain/IP reputation
 VIRUSTOTAL_API_KEY=...
+
+# Anthropic Claude — alternative LLM provider
+ANTHROPIC_API_KEY=...
 ```
 
 ### Safety check (before sharing exports)
@@ -248,6 +300,22 @@ Test suite (75 tests):
 | `test_connectors_core.py` | Shodan / BrandImpersonation / HIBP — pure logic + mocked HTTP |
 | `test_connector_smoke.py` | All 17 connectors — instantiation, interface, API key guards |
 | `test_cli_smoke.py` | CLI entry point, FastAPI health endpoint |
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+|-------|-----------|
+| **Backend** | Python 3.11+, FastAPI, SQLAlchemy 2.0, Uvicorn |
+| **Frontend** | Jinja2 templates, Tailwind CSS, Alpine.js, HTMX, Chart.js |
+| **Database** | SQLite (default), PostgreSQL via `DATABASE_URL` |
+| **LLM** | OpenAI GPT-4.1, Anthropic Claude, deterministic local fallback |
+| **RAG** | BM25 TF-IDF (local, no vector store, no embedding API) |
+| **DNS** | dnspython |
+| **Reports** | ReportLab (PDF generation), pypdf (PDF parsing) |
+| **Browser** | Playwright (headless, for JS-rendered pages) |
+| **Quality** | Ruff, mypy (scoped), pytest, pre-commit |
 
 ---
 
