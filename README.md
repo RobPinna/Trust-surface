@@ -1,6 +1,8 @@
 # Trust Surface
 
-> **Defensive research project** — An evidence-first CTI framework that treats social engineering risk as a structured, queryable attack surface. Built from scratch in Python, vibe-coded with manual review of architecture decisions and post-generation code verification, a workflow shaped by a decade of fullstack development. Strictly defensive, public data only.
+### Trust surface mapper | social engineering
+
+> **Defensive research project** — Strictly defensive, public data only.
 
 ![Trust Surface demo](Demo_1.gif)
 
@@ -8,9 +10,13 @@
 
 ## What it does
 
-You give it a company name, domain, and sector. It collects public evidence from 17 sources, correlates signals cross-source, and uses LLM reasoning to produce scored risk hypotheses with full evidence chains — each one answering: **where could an adversary leverage your organization's public trust relationships to gain access?**
+The analytical focus is **trust leverage and social engineering risk**.
 
-The analytical focus is **trust leverage and social engineering risk**: the attack surface exposed through an organization's public workflows, vendor relationships, and communication channels that an adversary could exploit to conduct BEC, spear-phishing, impersonation, or supply-chain manipulation.
+The attack surface exposed through an organization's public workflows, vendor relationships, and communication channels that an adversary could exploit to conduct BEC, spear-phishing, impersonation, or supply-chain manipulation.
+
+It treats social engineering risk as a **structured, queryable attack surface**, not a checklist item in a pentest report.
+
+You give it a company name, domain, and sector. It collects public evidence from 17 sources, correlates signals cross-source, and uses LLM reasoning to produce scored risk hypotheses with full evidence chains — each one answering: **where could an adversary leverage your organization's public trust relationships to gain access?**
 
 The core contribution is the analytical frame itself: **"trust surface"** and **"operational leverage"** as formal concepts applied to social engineering risk.
 
@@ -113,7 +119,7 @@ Operational-Leverage-Framework/
 |-----------|--------|---------|-------------|
 | `website_analyzer` | Target website crawl | No | Vendor deps, workflow cues, process signals |
 | `official_channel_enumerator` | Public social/web | No | Channel ambiguity, contact exposure |
-| `public_role_extractor` | Public web / LinkedIn | No | Org chart leakage, role exposure |
+| `public_role_extractor` | Public web / documents | No | Org chart leakage, role exposure |
 | `email_posture_analyzer` | DNS (SPF/DMARC/DKIM) | No | Email spoofing risk, policy posture |
 | `dns_footprint` | DNS (A/MX/NS/CNAME/AAAA) | No | Infrastructure exposure |
 | `subdomain_discovery` | DNS brute + Certificate Transparency | No | Attack surface expansion |
@@ -166,6 +172,28 @@ The scoring model classifies evidence into 14 canonical signal types:
 | **Account takeover** | Password reset, login, identity workflow exploitation |
 | **Supply chain dependency** | Downstream pivot risk through vendor trust |
 | **Channel ambiguity** | Multiple official channels creating confusion vectors |
+
+---
+
+## MITRE ATT&CK mapping
+
+Each risk hypothesis is tagged with ATT&CK technique IDs through a dual pathway:
+
+- **Heuristic mapping** — rule-based keyword matching assigns baseline techniques (T1566 Phishing, T1598 Phishing for Information, T1078 Valid Accounts, T1656 Impersonation, T1589 Gather Victim Identity Information, T1591 Gather Victim Org Information, T1593 Search Open Websites/Domains)
+- **LLM-enhanced mapping** — when evidence permits, the reasoner generates contextual technique assignments validated against the `TAxxxx` / `Txxxx` / `Txxxx.xxx` format
+
+Techniques are displayed per-risk on the risk detail page, aggregated at the assessment level on the overview dashboard, and included in PDF exports.
+
+---
+
+## Multi-assessment trend analysis
+
+When multiple assessments target the same domain or company, the system automatically computes risk score deltas:
+
+- **Previous assessment lookup** — matches by normalized domain or company name, ordered by creation date
+- **Delta scoring** — calculates the difference between current and previous overall risk scores
+- **Trend direction** — classifies as `worse` (score increased), `improved` (score decreased), or `stable`
+- **UI integration** — assessment list shows color-coded deltas (red for deterioration, green for improvement); the overview dashboard displays a "Delta vs previous" KPI card with reference to the prior assessment
 
 ---
 
@@ -341,8 +369,6 @@ The following capabilities are planned for future development:
 
 ### Platform
 
-- [ ] MITRE ATT&CK technique tagging on risk hypotheses
-- [ ] Multi-assessment trend analysis (risk delta over time)
 - [ ] Team/multi-user assessment workflow
 - [ ] Webhook/SIEM integration for continuous monitoring mode
 
